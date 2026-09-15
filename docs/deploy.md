@@ -48,6 +48,11 @@ $SSH_DEPLOYMENT_PATH/
     var/interaction-state/
 ```
 
+Release directories are named by the commit actually checked out for that run,
+resolved with `git rev-parse HEAD` after checkout. A manual deployment of a
+non-default `ref` therefore lands under its own commit and cannot overwrite an
+unrelated release.
+
 The workflow creates `releases/`, `shared/bundle/`, and
 `shared/var/interaction-state/` on first run. Each release symlinks
 `.env` and `var/interaction-state` into `shared/`, so conversational state

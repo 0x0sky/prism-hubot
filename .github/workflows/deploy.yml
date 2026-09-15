@@ -96,10 +96,17 @@ jobs:
           } > ~/.ssh/config
           chmod 600 ~/.ssh/config
 
+      - name: Resolve release commit
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          echo "Deploying $release_sha"
+
       - name: Build release archive
         run: |
           set -euo pipefail
-          git archive --format=tar --prefix=release/ HEAD | gzip -9 > /tmp/release.tar.gz
+          git archive --format=tar --prefix=release/ "$RELEASE_SHA" | gzip -9 > /tmp/release.tar.gz
           ls -l /tmp/release.tar.gz
 
       - name: Prepare remote layout
@@ -122,12 +129,12 @@ jobs:
       - name: Upload release archive
         run: |
           set -euo pipefail
-          scp /tmp/release.tar.gz deploy-target:"$SSH_DEPLOYMENT_PATH/releases/${GITHUB_SHA}.tar.gz"
+          scp /tmp/release.tar.gz deploy-target:"$SSH_DEPLOYMENT_PATH/releases/${RELEASE_SHA}.tar.gz"
 
       - name: Install release
         run: |
           set -euo pipefail
-          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' RELEASE='$GITHUB_SHA' KEEP_RELEASES='$KEEP_RELEASES' bash -s" <<'REMOTE'
+          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' RELEASE='$RELEASE_SHA' KEEP_RELEASES='$KEEP_RELEASES' bash -s" <<'REMOTE'
           set -euo pipefail
           release_dir="$DEPLOY_PATH/releases/$RELEASE"
           rm -rf "$release_dir"
