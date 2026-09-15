@@ -101,25 +101,35 @@ it anyway so ownership is deliberate rather than inherited from the creating
 shell. Whatever was used, `Group=` in the unit must match `id -gn deploy`.
 
 The deploy user needs exactly one privileged capability — restarting the unit —
-and nothing else. In `/etc/sudoers.d/deploy` (mode `0440`, validated with
-`visudo -cf`):
+and nothing else. Read what it already has before adding anything:
+
+```bash
+sudo -l -U deploy
+```
+
+If that output already grants `NOPASSWD` on `systemctl`, the default
+`DEPLOY_RESTART_COMMAND` works as is and no new rule is needed. Otherwise add
+one in `/etc/sudoers.d/deploy` (mode `0440`, validated with `visudo -cf`):
 
 ```text
 deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart prism-hubot.service
 ```
 
-That line is what the default `DEPLOY_RESTART_COMMAND` expects. Resolve the
-real path first with `command -v systemctl` — it is `/usr/bin/systemctl` on a
-usr-merged Debian or Ubuntu and `/bin/systemctl` elsewhere — because a sudoers
-rule that does not match the real path silently fails to apply. Confirm with
+Resolve the real path first with `command -v systemctl` — it is
+`/usr/bin/systemctl` on a usr-merged Debian or Ubuntu and `/bin/systemctl`
+elsewhere — because a sudoers rule that does not match the real path silently
+fails to apply. Confirm with
 `sudo -u deploy sudo -n systemctl restart prism-hubot.service` once the unit
 exists.
 
-If the deploy account is also in the `sudo` group, or in any group that grants
-container control such as `docker`, that membership outranks this narrow rule:
-anything that reaches the account reaches root. Remove those memberships from
-the deploy account and leave it only the restart rule above, or accept
-deliberately that `SSH_PRIVATE_KEY` is a root credential for this machine.
+Read that same output for what it grants beyond a restart. An unrestricted
+`NOPASSWD` entry for `systemctl` or `systemd-run` is arbitrary root execution,
+not a narrow restart permission, and membership in `sudo` or in a group that
+grants container control such as `docker` has the same effect. Where any of
+those hold, `SSH_PRIVATE_KEY` is a root credential for the machine and the
+narrow rule above changes nothing. Either strip the account down to the restart
+rule, give the deployment its own account separate from the interactive one, or
+accept the blast radius deliberately.
 
 Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`:
 
