@@ -1,0 +1,184 @@
+# © 2026 aiaiaiai · aiaiaiai.org
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to deploy
+        required: false
+        default: master
+  workflow_run:
+    workflows: [Full CI]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Release to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      SSH_DEPLOYMENT_PATH: ${{ secrets.SSH_DEPLOYMENT_PATH }}
+      RESTART_COMMAND: ${{ vars.DEPLOY_RESTART_COMMAND }}
+      HEALTHCHECK_URL: ${{ vars.DEPLOY_HEALTHCHECK_URL }}
+      KEEP_RELEASES: 5
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require deployment secrets
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in SSH_HOST SSH_USER SSH_DEPLOYMENT_PATH SSH_PRIVATE_KEY; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "Missing repository secrets: ${missing[*]}" >&2
+            echo "SSH_PORT is optional and defaults to 22." >&2
+            exit 1
+          fi
+          case "$SSH_DEPLOYMENT_PATH" in
+            /*) ;;
+            *) echo "SSH_DEPLOYMENT_PATH must be an absolute path." >&2; exit 1 ;;
+          esac
+
+      - name: Configure SSH client
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          port="${SSH_PORT:-22}"
+          if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$port" -H "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/known_hosts
+          {
+            echo "Host deploy-target"
+            echo "  HostName $SSH_HOST"
+            echo "  User $SSH_USER"
+            echo "  Port $port"
+            echo "  IdentityFile ~/.ssh/deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking yes"
+            echo "  BatchMode yes"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Resolve release commit
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          echo "Deploying $release_sha"
+
+      - name: Build release archive
+        run: |
+          set -euo pipefail
+          git archive --format=tar --prefix=release/ "$RELEASE_SHA" | gzip -9 > /tmp/release.tar.gz
+          ls -l /tmp/release.tar.gz
+
+      - name: Prepare remote layout
+        run: |
+          set -euo pipefail
+          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          mkdir -p "$DEPLOY_PATH/releases" "$DEPLOY_PATH/shared/var/interaction-state" "$DEPLOY_PATH/shared/bundle"
+          chmod 700 "$DEPLOY_PATH/shared/var/interaction-state"
+          if [ ! -f "$DEPLOY_PATH/shared/.env" ]; then
+            echo "Missing $DEPLOY_PATH/shared/.env on the VPS." >&2
+            echo "Create it from .env.example with real runtime values, then re-run this workflow." >&2
+            exit 1
+          fi
+          command -v ruby >/dev/null || { echo "ruby is not installed on the VPS." >&2; exit 1; }
+          command -v bundle >/dev/null || { echo "bundler is not installed on the VPS." >&2; exit 1; }
+          command -v git >/dev/null || { echo "git is required to resolve the pinned prism-bot dependency." >&2; exit 1; }
+          REMOTE
+
+      - name: Upload release archive
+        run: |
+          set -euo pipefail
+          scp /tmp/release.tar.gz deploy-target:"$SSH_DEPLOYMENT_PATH/releases/${RELEASE_SHA}.tar.gz"
+
+      - name: Install release
+        run: |
+          set -euo pipefail
+          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' RELEASE='$RELEASE_SHA' KEEP_RELEASES='$KEEP_RELEASES' bash -s" <<'REMOTE'
+          set -euo pipefail
+          release_dir="$DEPLOY_PATH/releases/$RELEASE"
+          rm -rf "$release_dir"
+          mkdir -p "$release_dir"
+          tar -xzf "$DEPLOY_PATH/releases/$RELEASE.tar.gz" -C "$release_dir" --strip-components=1
+          rm -f "$DEPLOY_PATH/releases/$RELEASE.tar.gz"
+
+          ln -sfn "$DEPLOY_PATH/shared/.env" "$release_dir/.env"
+          mkdir -p "$release_dir/var"
+          ln -sfn "$DEPLOY_PATH/shared/var/interaction-state" "$release_dir/var/interaction-state"
+
+          cd "$release_dir"
+          bundle config set --local deployment true
+          bundle config set --local path "$DEPLOY_PATH/shared/bundle"
+          bundle config set --local without development
+          bundle install --jobs 4 --retry 3
+
+          ln -sfn "$release_dir" "$DEPLOY_PATH/current.tmp"
+          mv -T "$DEPLOY_PATH/current.tmp" "$DEPLOY_PATH/current"
+
+          cd "$DEPLOY_PATH/releases"
+          ls -1dt */ 2>/dev/null | tail -n "+$((KEEP_RELEASES + 1))" | xargs -r rm -rf
+          REMOTE
+
+      - name: Restart service
+        run: |
+          set -euo pipefail
+          command="${RESTART_COMMAND:-sudo -n systemctl restart prism-hubot.service}"
+          ssh deploy-target "$command"
+
+      - name: Health check
+        if: env.HEALTHCHECK_URL != ''
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if ssh deploy-target "curl -fsS --max-time 5 '$HEALTHCHECK_URL' >/dev/null"; then
+              echo "Healthy after attempt $attempt."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Health check did not pass: $HEALTHCHECK_URL" >&2
+          exit 1
+
+      - name: Remove SSH material
+        if: always()
+        run: rm -rf ~/.ssh
