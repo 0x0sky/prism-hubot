@@ -76,30 +76,95 @@ when any of these is missing:
 short-lived interaction state. Keep them owned by the deploy user and not world
 readable; the workflow sets mode `0700` on the state directory.
 
+## Server bootstrap
+
+One-time preparation as `root`, for `SSH_DEPLOYMENT_PATH=/srv/prism-hubot`. The
+account must exist before any `install -o prism` call, otherwise `install`
+reports `invalid user: 'prism'`.
+
+```bash
+adduser --system --group --home /home/prism --shell /bin/bash prism
+
+install -d -o prism -g prism -m 700 /home/prism/.ssh
+install -o prism -g prism -m 600 /dev/null /home/prism/.ssh/authorized_keys
+# append the public half of SSH_PRIVATE_KEY to that file
+
+install -d -o prism -g prism -m 755 /srv/prism-hubot
+```
+
+The deploy user needs exactly one privileged capability — restarting the unit —
+and nothing else. In `/etc/sudoers.d/prism` (mode `0440`, validated with
+`visudo -cf`):
+
+```text
+prism ALL=(root) NOPASSWD: /bin/systemctl restart prism-hubot.service
+```
+
+That line is what the default `DEPLOY_RESTART_COMMAND` expects. Check the
+binary path first: on some distributions `systemctl` is `/usr/bin/systemctl`,
+and a sudoers rule that does not match the real path silently fails to apply.
+
+Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`. If
+Ruby comes from a per-user version manager rather than a system package, the
+systemd unit needs the absolute interpreter path below, because systemd does
+not read login shell configuration.
+
+Finally, create `/srv/prism-hubot/shared/.env` from `.env.example`, owned by
+`prism` with mode `600`. The remaining directories are created by the workflow
+on its first run.
+
 ## Suggested systemd unit
+
+`/etc/systemd/system/prism-hubot.service`:
 
 ```ini
 [Unit]
-Description=prism-hubot
+Description=prism-hubot Telegram client
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=prism
+Group=prism
 WorkingDirectory=/srv/prism-hubot/current
 EnvironmentFile=/srv/prism-hubot/shared/.env
-ExecStart=/usr/local/bin/bundle exec rackup config.ru -s Puma -o 127.0.0.1 -p 9292
+ExecStart=/usr/bin/bundle exec rackup config.ru -s Puma -o 127.0.0.1 -p 9292
 Restart=on-failure
 RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/prism-hubot/shared/var/interaction-state
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`WorkingDirectory` points at the `current` symlink, so a restart after a deploy
-picks up the new release. Terminate TLS in front of the process and forward
-Telegram webhook requests to `/telegram/webhook`; `/healthz` stays internal.
+```bash
+systemctl daemon-reload
+systemctl enable --now prism-hubot.service
+```
+
+Notes on the unit:
+
+- `WorkingDirectory` points at the `current` symlink, so a restart after a
+  deployment picks up the new release without editing the unit;
+- replace the `ExecStart` path with the output of `sudo -u prism command -v
+  bundle`. systemd resolves no login shell, so a version-manager shim is not on
+  its `PATH`;
+- `ProtectSystem=strict` makes the whole filesystem read-only for the service.
+  `ReadWritePaths` reopens only the interaction-state directory, which matches
+  what the process actually writes. Point it at
+  `PRISM_HUBOT_INTERACTION_STATE_DIR` if that variable is set to another path;
+- `EnvironmentFile` is parsed by systemd, not by a shell: plain `KEY=VALUE`
+  lines, no `export`, no shell interpolation. `.env.example` already has that
+  shape;
+- terminate TLS in front of the process and forward Telegram webhook requests
+  to `/telegram/webhook`. `/healthz` stays bound to `127.0.0.1` and is not
+  exposed publicly.
 
 ## Rollback
 
