@@ -105,20 +105,33 @@ and nothing else. In `/etc/sudoers.d/deploy` (mode `0440`, validated with
 `visudo -cf`):
 
 ```text
-deploy ALL=(root) NOPASSWD: /bin/systemctl restart prism-hubot.service
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart prism-hubot.service
 ```
 
-That line is what the default `DEPLOY_RESTART_COMMAND` expects. Check the
-binary path first with `command -v systemctl`: on some distributions it is
-`/usr/bin/systemctl`, and a sudoers rule that does not match the real path
-silently fails to apply. Confirm the result with
+That line is what the default `DEPLOY_RESTART_COMMAND` expects. Resolve the
+real path first with `command -v systemctl` — it is `/usr/bin/systemctl` on a
+usr-merged Debian or Ubuntu and `/bin/systemctl` elsewhere — because a sudoers
+rule that does not match the real path silently fails to apply. Confirm with
 `sudo -u deploy sudo -n systemctl restart prism-hubot.service` once the unit
 exists.
 
-Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`. If
-Ruby comes from a per-user version manager rather than a system package, the
-systemd unit needs the absolute interpreter path below, because systemd does
-not read login shell configuration.
+If the deploy account is also in the `sudo` group, or in any group that grants
+container control such as `docker`, that membership outranks this narrow rule:
+anything that reaches the account reaches root. Remove those memberships from
+the deploy account and leave it only the restart rule above, or accept
+deliberately that `SSH_PRIVATE_KEY` is a root credential for this machine.
+
+Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`:
+
+```bash
+sudo -u deploy bash -lc 'ruby -v; command -v bundle; command -v git'
+```
+
+A login shell is required here because `command` is a shell builtin, so
+`sudo -u deploy command -v bundle` fails with `command not found`. If Ruby
+comes from a per-user version manager rather than a system package, the systemd
+unit needs the absolute path this prints, because systemd does not read login
+shell configuration.
 
 Finally, create `/srv/prism-hubot/shared/.env` from `.env.example`, owned by
 `deploy` with mode `600`. The remaining directories are created by the workflow
@@ -167,9 +180,9 @@ Notes on the unit:
   workflow has run once, or expect the first start to fail;
 - `User`/`Group` must match the deploy account, so the service reads the same
   interaction state the deployment writes;
-- replace the `ExecStart` path with the output of `sudo -u deploy command -v
-  bundle`. systemd resolves no login shell, so a version-manager shim is not on
-  its `PATH`;
+- replace the `ExecStart` path with the output of
+  `sudo -u deploy bash -lc 'command -v bundle'`. systemd resolves no login
+  shell, so a version-manager shim is not on its `PATH`;
 - `ProtectSystem=strict` makes the whole filesystem read-only for the service.
   `ReadWritePaths` reopens only the interaction-state directory, which matches
   what the process actually writes. Point it at
