@@ -1,0 +1,28 @@
+# © 2026 aiaiaiai · aiaiaiai.org
+#
+# Installed to /etc/systemd/system/prism-hubot.service by deploy/bootstrap.sh,
+# which substitutes the deploy user, deployment path and bundle path in place.
+
+[Unit]
+Description=prism-hubot Telegram client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@DEPLOY_USER@
+Group=@DEPLOY_GROUP@
+WorkingDirectory=@DEPLOY_PATH@/current
+EnvironmentFile=@DEPLOY_PATH@/shared/.env
+ExecStart=@BUNDLE@ exec rackup config.ru -s Puma -o 127.0.0.1 -p @APP_PORT@
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@DEPLOY_PATH@/shared/var/interaction-state
+
+[Install]
+WantedBy=multi-user.target

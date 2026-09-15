@@ -1,0 +1,17 @@
+# © 2026 aiaiaiai · aiaiaiai.org
+#
+# Installed to /etc/caddy/Caddyfile by deploy/bootstrap.sh when PUBLIC_HOST is
+# set. Caddy obtains and renews the certificate itself; /healthz is deliberately
+# not proxied and stays reachable only from the host.
+
+@PUBLIC_HOST@ {
+  encode zstd gzip
+
+  handle /telegram/webhook {
+    reverse_proxy 127.0.0.1:@APP_PORT@
+  }
+
+  handle {
+    respond 404
+  }
+}

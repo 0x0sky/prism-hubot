@@ -84,7 +84,7 @@ See [`docs/architecture.md`](docs/architecture.md) for ownership, state-persiste
 
 ## Deployment
 
-`master` deploys to a single VPS over SSH after `Full CI` succeeds, and can be released manually through the `Deploy` workflow. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
+`master` deploys to a single VPS over SSH after `Full CI` succeeds, and can be released manually through the `Deploy` workflow. Server preparation lives in `deploy/`: `bootstrap.sh` is an idempotent one-time setup, `prism-hubot.service` and `Caddyfile` are the templates it renders, and `set-webhook.sh` registers the Telegram webhook. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, the remote layout, and what stays manual.
 
 ## Verification
 

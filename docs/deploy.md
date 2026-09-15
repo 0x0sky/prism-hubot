@@ -78,190 +78,89 @@ readable; the workflow sets mode `0700` on the state directory.
 
 ## Server bootstrap
 
-One-time preparation as `root`, for `SSH_DEPLOYMENT_PATH=/srv/prism-hubot`. The
-deploy account is called `deploy` here; use whatever name `SSH_USER` holds and
-keep it consistent across the sudoers rule and the unit.
-
-The account must exist before any `install -o deploy` call, otherwise `install`
-reports `invalid user: 'deploy'`. Verify with `id deploy` before continuing.
+`deploy/bootstrap.sh` performs the one-time server preparation. It is
+idempotent: rerunning it after installing a dependency or changing a value is
+the intended way to use it, and it never rewrites an existing `shared/.env`.
 
 ```bash
-adduser --system --group --home /home/deploy --shell /bin/bash deploy
-
-install -d -o deploy -g deploy -m 700 /home/deploy/.ssh
-install -o deploy -g deploy -m 600 /dev/null /home/deploy/.ssh/authorized_keys
-# append the public half of SSH_PRIVATE_KEY to that file
-
-install -d -o deploy -g deploy -m 755 /srv/prism-hubot
+sudo DEPLOY_USER=deploy DEPLOY_PATH=/srv/prism-hubot \
+  PUBLIC_HOST=prism.example.org deploy/bootstrap.sh
 ```
 
-Omitting `-g` is not fatal: the directory is then owned by `deploy:root`, and
-`0755` still lets the deploy user write inside it, so the workflow works. Pass
-it anyway so ownership is deliberate rather than inherited from the creating
-shell. Whatever was used, `Group=` in the unit must match `id -gn deploy`.
+It creates the deploy account and its `.ssh` directory, the deployment root and
+shared directories, a sudoers rule scoped to restarting the service, and the
+systemd unit rendered from `deploy/prism-hubot.service` with the account,
+paths, and the real `bundle` path resolved through the deploy user's login
+shell. With `PUBLIC_HOST` set and Caddy installed, it also renders
+`deploy/Caddyfile` and reloads Caddy.
 
-The deploy user needs exactly one privileged capability — restarting the unit —
-and nothing else. Read what it already has before adding anything:
+It exits non-zero while anything on the host still needs a decision, and lists
+what: an empty `authorized_keys`, a `shared/.env` still holding placeholders,
+a missing Bundler, a `current` symlink that does not exist yet. Rerun it after
+each of those is resolved until it exits clean.
 
-```bash
-sudo -l -U deploy
-```
+Two ordering details it handles rather than hides:
 
-If that output already grants `NOPASSWD` on `systemctl`, the default
-`DEPLOY_RESTART_COMMAND` works as is and no new rule is needed. Otherwise add
-one in `/etc/sudoers.d/deploy` (mode `0440`, validated with `visudo -cf`):
+- the unit is installed but not enabled until `current` exists, because that
+  symlink appears only after the first successful deployment. Run the workflow
+  once, then rerun the script;
+- an account that already carries a passwordless `systemctl` grant gets no new
+  sudoers rule. Read `sudo -l -U deploy` before trusting the narrow rule: an
+  unrestricted `NOPASSWD` entry for `systemctl` or `systemd-run`, or membership
+  in `sudo` or `docker`, is arbitrary root execution, which makes
+  `SSH_PRIVATE_KEY` a root credential for the machine regardless of what the
+  rule says.
 
-```text
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart prism-hubot.service
-```
-
-Resolve the real path first with `command -v systemctl` — it is
-`/usr/bin/systemctl` on a usr-merged Debian or Ubuntu and `/bin/systemctl`
-elsewhere — because a sudoers rule that does not match the real path silently
-fails to apply. Confirm with
-`sudo -u deploy sudo -n systemctl restart prism-hubot.service` once the unit
-exists.
-
-Read that same output for what it grants beyond a restart. An unrestricted
-`NOPASSWD` entry for `systemctl` or `systemd-run` is arbitrary root execution,
-not a narrow restart permission, and membership in `sudo` or in a group that
-grants container control such as `docker` has the same effect. Where any of
-those hold, `SSH_PRIVATE_KEY` is a root credential for the machine and the
-narrow rule above changes nothing. Either strip the account down to the restart
-rule, give the deployment its own account separate from the interactive one, or
-accept the blast radius deliberately.
-
-Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`:
-
-```bash
-sudo -u deploy bash -lc 'ruby -v; command -v bundle; command -v git'
-```
-
-A login shell is required here because `command` is a shell builtin, so
-`sudo -u deploy command -v bundle` fails with `command not found`. If Ruby
-comes from a per-user version manager rather than a system package, the systemd
-unit needs the absolute path this prints, because systemd does not read login
-shell configuration.
-
-Finally, create `/srv/prism-hubot/shared/.env` from `.env.example`, owned by
-`deploy` with mode `600`. The remaining directories are created by the workflow
-on its first run.
-
-## Suggested systemd unit
-
-`/etc/systemd/system/prism-hubot.service`:
-
-```ini
-[Unit]
-Description=prism-hubot Telegram client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=deploy
-Group=deploy
-WorkingDirectory=/srv/prism-hubot/current
-EnvironmentFile=/srv/prism-hubot/shared/.env
-ExecStart=/usr/bin/bundle exec rackup config.ru -s Puma -o 127.0.0.1 -p 9292
-Restart=on-failure
-RestartSec=5
-
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/srv/prism-hubot/shared/var/interaction-state
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload
-systemctl enable --now prism-hubot.service
-```
-
-Notes on the unit:
-
-- `WorkingDirectory` points at the `current` symlink, so a restart after a
-  deployment picks up the new release without editing the unit. It does not
-  exist until the first successful deployment, so enable the unit after the
-  workflow has run once, or expect the first start to fail;
-- `User`/`Group` must match the deploy account, so the service reads the same
-  interaction state the deployment writes;
-- replace the `ExecStart` path with the output of
-  `sudo -u deploy bash -lc 'command -v bundle'`. systemd resolves no login
-  shell, so a version-manager shim is not on its `PATH`;
-- `ProtectSystem=strict` makes the whole filesystem read-only for the service.
-  `ReadWritePaths` reopens only the interaction-state directory, which matches
-  what the process actually writes. Point it at
-  `PRISM_HUBOT_INTERACTION_STATE_DIR` if that variable is set to another path;
-- `ProtectHome=yes` hides `/home`, which is fine for a deployment under `/srv`
-  but would hide the release itself under a home-directory deployment path;
-- `EnvironmentFile` is parsed by systemd, not by a shell: plain `KEY=VALUE`
-  lines, no `export`, no shell interpolation. `.env.example` already has that
-  shape;
-- terminate TLS in front of the process and forward Telegram webhook requests
-  to `/telegram/webhook`. `/healthz` stays bound to `127.0.0.1` and is not
-  exposed publicly.
+The unit binds the process to `127.0.0.1` and grants it one writable path,
+`shared/var/interaction-state`. `WorkingDirectory` points at `current`, so a
+restart after a deployment picks up the new release without editing the unit.
+`EnvironmentFile` is parsed by systemd rather than a shell: plain `KEY=VALUE`
+lines, no `export`, no interpolation, which is the shape `.env.example`
+already has.
 
 ## Public endpoint
 
-The deployment leaves the process bound to `127.0.0.1:9292`. Telegram only
-delivers updates to a public HTTPS URL, so a reverse proxy and a certificate
-are required before the bot receives anything. Neither is created by the
-workflow.
+The service listens on loopback. Telegram delivers updates only to a public
+HTTPS URL, so a reverse proxy, a certificate and a DNS record have to exist
+before the bot receives anything. Caddy needs no application code; it obtains
+and renews the certificate itself.
 
-What has to exist, once:
+`deploy/Caddyfile` proxies `/telegram/webhook` to the application and answers
+`404` everywhere else, so `/healthz` is not published: it stays a loopback
+liveness probe, which is what `DEPLOY_HEALTHCHECK_URL` should point at
+(`http://127.0.0.1:9292/healthz`, curled from inside the VPS over SSH).
 
-1. a DNS `A` record for the public hostname pointing at the server's IPv4
-   address (add `AAAA` only if the host really serves IPv6);
-2. a reverse proxy terminating TLS and forwarding to `127.0.0.1:9292`;
-3. inbound `443` open in the Hetzner Cloud firewall and any host firewall;
-4. a Telegram webhook registered against that hostname.
-
-Caddy obtains and renews the certificate on its own. `/etc/caddy/Caddyfile`:
-
-```text
-prism.example.org {
-  reverse_proxy 127.0.0.1:9292
-}
-```
-
-With nginx the certificate is a separate concern (`certbot --nginx`), and the
-proxied location needs the usual forwarding headers:
-
-```nginx
-location / {
-  proxy_pass http://127.0.0.1:9292;
-  proxy_set_header Host $host;
-  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-  proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-Register the webhook after the service answers, using the same value as
-`PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. Read both values from the environment
-rather than typing them into a shell that records history:
+Register the webhook once the service answers:
 
 ```bash
-set -a && . /srv/prism-hubot/shared/.env && set +a
-curl -fsS "https://api.telegram.org/bot$PRISM_BOT_TELEGRAM_TOKEN/setWebhook" \
-  --data-urlencode "url=https://prism.example.org/telegram/webhook" \
-  --data-urlencode "secret_token=$PRISM_BOT_TELEGRAM_WEBHOOK_SECRET"
+sudo deploy/set-webhook.sh prism.example.org
 ```
 
-`getWebhookInfo` on the same token reports the registered URL and the last
-delivery error, which is the first thing to read when updates stop arriving.
-
-`/healthz` is for process liveness and stays internal: keep it unproxied and
-point `DEPLOY_HEALTHCHECK_URL` at `http://127.0.0.1:9292/healthz`, which the
-workflow curls from inside the VPS over SSH.
-
-Registering the webhook is a one-time action against Telegram, not part of a
-release, so the workflow does not perform it. It only changes when the public
+The script reads the token and `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET` from the
+deployed `.env`, refuses to run while either still holds a placeholder, keeps
+the token out of the argument list, and prints `getWebhookInfo` afterwards.
+That output reports the registered URL and the last delivery error, which is
+the first thing to read when updates stop arriving. Rerun it only when the
 hostname or the webhook secret changes.
+
+## What stays manual
+
+Nothing above reaches outside the machine, so these remain operator actions:
+
+- a DNS `A` record for the public hostname pointing at the server's IPv4
+  address. Add `AAAA` only if the host really serves IPv6;
+- inbound `443`, and the SSH port for the workflow, allowed in the Hetzner
+  Cloud firewall and in any host firewall;
+- the public half of `SSH_PRIVATE_KEY` appended to the deploy user's
+  `authorized_keys`;
+- real values in `$SSH_DEPLOYMENT_PATH/shared/.env`;
+- the repository secrets and variables listed above;
+- installing Ruby, Bundler, `git` and Caddy. The script reports which of them
+  are missing but does not choose a package source for the machine.
+
+A workable order: secrets and SSH reachability first, so the workflow can land
+a release; then `deploy/bootstrap.sh` until it exits clean; then DNS and Caddy;
+then `deploy/set-webhook.sh` last.
 
 ## Troubleshooting
 
