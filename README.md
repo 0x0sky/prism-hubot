@@ -82,6 +82,10 @@ Telegram
 
 See [`docs/architecture.md`](docs/architecture.md) for ownership, state-persistence, and dependency rules.
 
+## Deployment
+
+`master` deploys to a single VPS over SSH after `Full CI` succeeds, and can be released manually through the `Deploy` workflow. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
+
 ## Verification
 
 ```bash
