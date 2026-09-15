@@ -79,11 +79,16 @@ jobs:
           port="${SSH_PORT:-22}"
           if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
             printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            ssh-keyscan -p "$port" -H "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          elif ! ssh-keyscan -T 15 -p "$port" -H "$SSH_HOST" > ~/.ssh/known_hosts; then
+            echo "ssh-keyscan could not reach the VPS on port $port." >&2
+            exit 1
           fi
           chmod 600 ~/.ssh/known_hosts
-          test -s ~/.ssh/known_hosts
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "No host key for the VPS on port $port." >&2
+            echo "Set SSH_KNOWN_HOSTS, or make the port reachable from GitHub runners." >&2
+            exit 1
+          fi
           {
             echo "Host deploy-target"
             echo "  HostName $SSH_HOST"
@@ -93,8 +98,30 @@ jobs:
             echo "  IdentitiesOnly yes"
             echo "  StrictHostKeyChecking yes"
             echo "  BatchMode yes"
+            echo "  ConnectTimeout 20"
+            echo "  ServerAliveInterval 30"
+            echo "  ServerAliveCountMax 6"
           } > ~/.ssh/config
           chmod 600 ~/.ssh/config
+
+      - name: Verify SSH connectivity
+        run: |
+          set -euo pipefail
+          port="${SSH_PORT:-22}"
+          status=0
+          ssh deploy-target true || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "SSH reachable."
+            exit 0
+          fi
+          echo "Cannot open an SSH session to the VPS on port $port." >&2
+          echo "A timeout here means packets are dropped rather than refused. Usual causes:" >&2
+          echo "  - a Hetzner Cloud firewall or a host firewall that does not allow the port;" >&2
+          echo "  - SSH_HOST holding an IPv6 address, which GitHub-hosted runners cannot reach;" >&2
+          echo "  - sshd listening on another port, which belongs in SSH_PORT." >&2
+          echo "An authentication error instead means the public half of SSH_PRIVATE_KEY" >&2
+          echo "is not in the deploy user's authorized_keys." >&2
+          exit "$status"
 
       - name: Resolve release commit
         run: |

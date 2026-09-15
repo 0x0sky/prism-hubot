@@ -206,6 +206,36 @@ Notes on the unit:
   to `/telegram/webhook`. `/healthz` stays bound to `127.0.0.1` and is not
   exposed publicly.
 
+## Troubleshooting
+
+`Verify SSH connectivity` runs before anything is built or uploaded, so a
+network problem fails the run in seconds rather than part way through a
+release.
+
+`Connection timed out` means packets are dropped rather than refused, so the
+port is filtered somewhere:
+
+- a Hetzner Cloud firewall attached to the server, or a host firewall, that does
+  not allow the SSH port. GitHub-hosted runners come from a large, changing
+  address range, so an allowlist of fixed source addresses will not work for
+  them; open the port, or run the deployment from a self-hosted runner or a
+  tunnel with a stable address;
+- `SSH_HOST` holding an IPv6 address. GitHub-hosted runners are IPv4-only, so
+  an AAAA-only target is unreachable from them;
+- `sshd` listening on a non-default port, which belongs in `SSH_PORT`.
+
+`Connection refused` instead means the host answered and nothing is listening
+on that port. `Permission denied (publickey)` means the network is fine and the
+public half of `SSH_PRIVATE_KEY` is missing from the deploy user's
+`authorized_keys`.
+
+Check reachability independently of CI before re-running:
+
+```bash
+nc -vz <host> 22
+ssh -v -i <deploy-key> deploy@<host> true
+```
+
 ## Rollback
 
 ```bash
