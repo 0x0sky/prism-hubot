@@ -58,6 +58,19 @@ jobs:
             *) echo "SSH_DEPLOYMENT_PATH must be an absolute path." >&2; exit 1 ;;
           esac
 
+      - name: Diagnose SSH target
+        run: |
+          set -euo pipefail
+          echo "Resolved SSH target addresses:"
+          getent ahosts "$SSH_HOST"
+          port="${SSH_PORT:-22}"
+          if timeout 5 bash -c "</dev/tcp/$SSH_HOST/$port"; then
+            echo "TCP $port reachable from GitHub runner."
+          else
+            echo "TCP $port NOT reachable from GitHub runner." >&2
+            exit 1
+          fi
+
       - name: Configure SSH client
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
