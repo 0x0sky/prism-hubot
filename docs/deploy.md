@@ -75,30 +75,39 @@ when any of these is missing:
 short-lived interaction state. Keep them owned by the deploy user and not world
 readable; the workflow sets mode `0700` on the state directory.
 
-## Suggested systemd unit
+## systemd unit
 
-```ini
-[Unit]
-Description=prism-hubot
-After=network-online.target
-Wants=network-online.target
+The unit is shipped with the repository as a template
+(`deploy/prism-hubot.service`) and installed by `deploy/install-service.sh`. Run
+it once on the VPS, as root, from a checkout of this repository, before the
+first deployment:
 
-[Service]
-Type=simple
-User=prism
-WorkingDirectory=/srv/prism-hubot/current
-EnvironmentFile=/srv/prism-hubot/shared/.env
-ExecStart=/usr/local/bin/bundle exec rackup config.ru -s Puma -o 127.0.0.1 -p 9292
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo DEPLOY_PATH=/srv/prism-hubot DEPLOY_USER=prism ./deploy/install-service.sh
 ```
+
+The script substitutes the deployment path, service user, `bundle` path, bind
+address and port into the unit, writes it to
+`/etc/systemd/system/prism-hubot.service`, writes a `sudoers` drop-in that lets
+the deploy user restart that unit without a password or TTY, reloads systemd and
+enables the unit. It deliberately does not start it: the unit needs
+`$DEPLOY_PATH/current`, which the first `Deploy` run creates. Re-running the
+script is safe.
+
+Overridable environment variables: `DEPLOY_PATH` (`/srv/prism-hubot`),
+`DEPLOY_USER` (`prism`), `BIND_ADDRESS` (`127.0.0.1`), `PORT` (`9292`),
+`BUNDLE_BIN` (resolved from the deploy user's `PATH`), `UNIT_NAME`
+(`prism-hubot.service`) and `INSTALL_SUDOERS` (`yes`).
 
 `WorkingDirectory` points at the `current` symlink, so a restart after a deploy
 picks up the new release. Terminate TLS in front of the process and forward
 Telegram webhook requests to `/telegram/webhook`; `/healthz` stays internal.
+
+If the service is managed some other way — a user unit, a container, a different
+unit name — leave this script alone and set the `DEPLOY_RESTART_COMMAND`
+repository variable instead. The workflow checks before uploading anything: with
+no `DEPLOY_RESTART_COMMAND` set, it requires `prism-hubot.service` to exist on
+the host and fails with installation instructions when it does not.
 
 ## Rollback
 

@@ -84,7 +84,7 @@ See [`docs/architecture.md`](docs/architecture.md) for ownership, state-persiste
 
 ## Deployment
 
-`Deploy` is manual-only and accepts an optional `ref` to release to the single VPS over SSH. Merging to `master` runs verification workflows but does not deploy. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
+`Deploy` is manual-only and accepts an optional `ref` to release to the single VPS over SSH. Merging to `master` runs verification workflows but does not deploy. The systemd unit is shipped with the repository (`deploy/prism-hubot.service`) and installed on the VPS once with `deploy/install-service.sh`. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
 
 ## Verification
 
