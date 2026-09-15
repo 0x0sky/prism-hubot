@@ -7,12 +7,11 @@ release, and `current` is repointed atomically.
 
 ## Trigger
 
-- automatically after `Full CI` succeeds on `master`;
 - manually via `workflow_dispatch`, optionally with an explicit `ref`.
 
-`workflow_run` triggers only fire for a workflow file that exists on the default
-branch, so the first deployment after merging this change must be started
-manually.
+Deploy is deliberately not triggered by merges or CI completion. Merging to
+`master` runs the normal verification workflows only; an operator explicitly
+starts `Deploy` and selects the ref to release.
 
 Deployments are serialised through the `deploy-vps` concurrency group and run in
 the `production` environment, so required reviewers or branch restrictions can be

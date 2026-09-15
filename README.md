@@ -84,7 +84,7 @@ See [`docs/architecture.md`](docs/architecture.md) for ownership, state-persiste
 
 ## Deployment
 
-`master` deploys to a single VPS over SSH after `Full CI` succeeds, and can be released manually through the `Deploy` workflow. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
+`Deploy` is manual-only and accepts an optional `ref` to release to the single VPS over SSH. Merging to `master` runs verification workflows but does not deploy. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
 
 ## Verification
 
