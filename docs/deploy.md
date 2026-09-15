@@ -79,30 +79,41 @@ readable; the workflow sets mode `0700` on the state directory.
 ## Server bootstrap
 
 One-time preparation as `root`, for `SSH_DEPLOYMENT_PATH=/srv/prism-hubot`. The
-account must exist before any `install -o prism` call, otherwise `install`
-reports `invalid user: 'prism'`.
+deploy account is called `deploy` here; use whatever name `SSH_USER` holds and
+keep it consistent across the sudoers rule and the unit.
+
+The account must exist before any `install -o deploy` call, otherwise `install`
+reports `invalid user: 'deploy'`. Verify with `id deploy` before continuing.
 
 ```bash
-adduser --system --group --home /home/prism --shell /bin/bash prism
+adduser --system --group --home /home/deploy --shell /bin/bash deploy
 
-install -d -o prism -g prism -m 700 /home/prism/.ssh
-install -o prism -g prism -m 600 /dev/null /home/prism/.ssh/authorized_keys
+install -d -o deploy -g deploy -m 700 /home/deploy/.ssh
+install -o deploy -g deploy -m 600 /dev/null /home/deploy/.ssh/authorized_keys
 # append the public half of SSH_PRIVATE_KEY to that file
 
-install -d -o prism -g prism -m 755 /srv/prism-hubot
+install -d -o deploy -g deploy -m 755 /srv/prism-hubot
 ```
 
+Omitting `-g` is not fatal: the directory is then owned by `deploy:root`, and
+`0755` still lets the deploy user write inside it, so the workflow works. Pass
+it anyway so ownership is deliberate rather than inherited from the creating
+shell. Whatever was used, `Group=` in the unit must match `id -gn deploy`.
+
 The deploy user needs exactly one privileged capability — restarting the unit —
-and nothing else. In `/etc/sudoers.d/prism` (mode `0440`, validated with
+and nothing else. In `/etc/sudoers.d/deploy` (mode `0440`, validated with
 `visudo -cf`):
 
 ```text
-prism ALL=(root) NOPASSWD: /bin/systemctl restart prism-hubot.service
+deploy ALL=(root) NOPASSWD: /bin/systemctl restart prism-hubot.service
 ```
 
 That line is what the default `DEPLOY_RESTART_COMMAND` expects. Check the
-binary path first: on some distributions `systemctl` is `/usr/bin/systemctl`,
-and a sudoers rule that does not match the real path silently fails to apply.
+binary path first with `command -v systemctl`: on some distributions it is
+`/usr/bin/systemctl`, and a sudoers rule that does not match the real path
+silently fails to apply. Confirm the result with
+`sudo -u deploy sudo -n systemctl restart prism-hubot.service` once the unit
+exists.
 
 Ruby `4.0.6`, Bundler and `git` must resolve on the deploy user's `PATH`. If
 Ruby comes from a per-user version manager rather than a system package, the
@@ -110,7 +121,7 @@ systemd unit needs the absolute interpreter path below, because systemd does
 not read login shell configuration.
 
 Finally, create `/srv/prism-hubot/shared/.env` from `.env.example`, owned by
-`prism` with mode `600`. The remaining directories are created by the workflow
+`deploy` with mode `600`. The remaining directories are created by the workflow
 on its first run.
 
 ## Suggested systemd unit
@@ -125,8 +136,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=prism
-Group=prism
+User=deploy
+Group=deploy
 WorkingDirectory=/srv/prism-hubot/current
 EnvironmentFile=/srv/prism-hubot/shared/.env
 ExecStart=/usr/bin/bundle exec rackup config.ru -s Puma -o 127.0.0.1 -p 9292
@@ -151,14 +162,20 @@ systemctl enable --now prism-hubot.service
 Notes on the unit:
 
 - `WorkingDirectory` points at the `current` symlink, so a restart after a
-  deployment picks up the new release without editing the unit;
-- replace the `ExecStart` path with the output of `sudo -u prism command -v
+  deployment picks up the new release without editing the unit. It does not
+  exist until the first successful deployment, so enable the unit after the
+  workflow has run once, or expect the first start to fail;
+- `User`/`Group` must match the deploy account, so the service reads the same
+  interaction state the deployment writes;
+- replace the `ExecStart` path with the output of `sudo -u deploy command -v
   bundle`. systemd resolves no login shell, so a version-manager shim is not on
   its `PATH`;
 - `ProtectSystem=strict` makes the whole filesystem read-only for the service.
   `ReadWritePaths` reopens only the interaction-state directory, which matches
   what the process actually writes. Point it at
   `PRISM_HUBOT_INTERACTION_STATE_DIR` if that variable is set to another path;
+- `ProtectHome=yes` hides `/home`, which is fine for a deployment under `/srv`
+  but would hide the release itself under a home-directory deployment path;
 - `EnvironmentFile` is parsed by systemd, not by a shell: plain `KEY=VALUE`
   lines, no `export`, no shell interpolation. `.env.example` already has that
   shape;
