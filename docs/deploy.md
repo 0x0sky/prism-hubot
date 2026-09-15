@@ -206,6 +206,63 @@ Notes on the unit:
   to `/telegram/webhook`. `/healthz` stays bound to `127.0.0.1` and is not
   exposed publicly.
 
+## Public endpoint
+
+The deployment leaves the process bound to `127.0.0.1:9292`. Telegram only
+delivers updates to a public HTTPS URL, so a reverse proxy and a certificate
+are required before the bot receives anything. Neither is created by the
+workflow.
+
+What has to exist, once:
+
+1. a DNS `A` record for the public hostname pointing at the server's IPv4
+   address (add `AAAA` only if the host really serves IPv6);
+2. a reverse proxy terminating TLS and forwarding to `127.0.0.1:9292`;
+3. inbound `443` open in the Hetzner Cloud firewall and any host firewall;
+4. a Telegram webhook registered against that hostname.
+
+Caddy obtains and renews the certificate on its own. `/etc/caddy/Caddyfile`:
+
+```text
+prism.example.org {
+  reverse_proxy 127.0.0.1:9292
+}
+```
+
+With nginx the certificate is a separate concern (`certbot --nginx`), and the
+proxied location needs the usual forwarding headers:
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:9292;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Register the webhook after the service answers, using the same value as
+`PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. Read both values from the environment
+rather than typing them into a shell that records history:
+
+```bash
+set -a && . /srv/prism-hubot/shared/.env && set +a
+curl -fsS "https://api.telegram.org/bot$PRISM_BOT_TELEGRAM_TOKEN/setWebhook" \
+  --data-urlencode "url=https://prism.example.org/telegram/webhook" \
+  --data-urlencode "secret_token=$PRISM_BOT_TELEGRAM_WEBHOOK_SECRET"
+```
+
+`getWebhookInfo` on the same token reports the registered URL and the last
+delivery error, which is the first thing to read when updates stop arriving.
+
+`/healthz` is for process liveness and stays internal: keep it unproxied and
+point `DEPLOY_HEALTHCHECK_URL` at `http://127.0.0.1:9292/healthz`, which the
+workflow curls from inside the VPS over SSH.
+
+Registering the webhook is a one-time action against Telegram, not part of a
+release, so the workflow does not perform it. It only changes when the public
+hostname or the webhook secret changes.
+
 ## Troubleshooting
 
 `Verify SSH connectivity` runs before anything is built or uploaded, so a
