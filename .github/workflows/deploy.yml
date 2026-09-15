@@ -61,9 +61,14 @@ jobs:
       - name: Diagnose SSH target
         run: |
           set -euo pipefail
-          echo "Resolved SSH target addresses:"
-          getent ahosts "$SSH_HOST"
           port="${SSH_PORT:-22}"
+          echo "SSH target matches expected hostname: $([[ "$SSH_HOST" == "prism.aiaiaiai.org" ]] && echo yes || echo no)"
+          echo "SSH target matches expected IPv4: $([[ "$SSH_HOST" == "62.238.19.244" ]] && echo yes || echo no)"
+          echo "Resolved IPv4 addresses:"
+          getent ahostsv4 "$SSH_HOST" || true
+          echo "Resolved IPv6 addresses:"
+          getent ahostsv6 "$SSH_HOST" || true
+          echo "Testing TCP $port from GitHub runner..."
           if timeout 5 bash -c "</dev/tcp/$SSH_HOST/$port"; then
             echo "TCP $port reachable from GitHub runner."
           else
