@@ -136,6 +136,24 @@ jobs:
           command -v git >/dev/null || { echo "git is required to resolve the pinned prism-bot dependency." >&2; exit 1; }
           REMOTE
 
+      - name: Verify restart target
+        run: |
+          set -euo pipefail
+          if [ -n "${RESTART_COMMAND:-}" ]; then
+            echo "Using DEPLOY_RESTART_COMMAND; skipping the systemd unit check."
+            exit 0
+          fi
+          if ssh deploy-target "systemctl cat prism-hubot.service >/dev/null 2>&1"; then
+            echo "prism-hubot.service is installed on the VPS."
+            exit 0
+          fi
+          echo "prism-hubot.service is not installed on the VPS." >&2
+          echo "Install it once on the host, as root, from a checkout of this repository:" >&2
+          echo "  sudo DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' DEPLOY_USER='$SSH_USER' ./deploy/install-service.sh" >&2
+          echo "Or set the DEPLOY_RESTART_COMMAND repository variable to the command that" >&2
+          echo "restarts this service (see docs/deploy.md)." >&2
+          exit 1
+
       - name: Upload release archive
         run: |
           set -euo pipefail
@@ -173,7 +191,13 @@ jobs:
         run: |
           set -euo pipefail
           command="${RESTART_COMMAND:-sudo -n systemctl restart prism-hubot.service}"
-          ssh deploy-target "$command"
+          if ! ssh deploy-target "$command"; then
+            echo "Restart command failed: $command" >&2
+            echo "The release is installed and 'current' points at it, but the service was not" >&2
+            echo "restarted. Check that the deploy user may run the restart without a TTY" >&2
+            echo "(deploy/install-service.sh writes a passwordless sudoers drop-in for it)." >&2
+            exit 1
+          fi
 
       - name: Health check
         if: env.HEALTHCHECK_URL != ''
