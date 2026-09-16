@@ -162,6 +162,11 @@ jobs:
           bundle config set --local without development
           bundle install --jobs 4 --retry 3
 
+          # Reads shared/.env exactly as systemd will, before anything is
+          # repointed or restarted: a line systemd would drop fails here
+          # while the previous release is still serving.
+          bundle exec rake env:check
+
           ln -sfn "$release_dir" "$DEPLOY_PATH/current.tmp"
           mv -T "$DEPLOY_PATH/current.tmp" "$DEPLOY_PATH/current"
 
@@ -201,9 +206,6 @@ jobs:
           ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
           cd "$DEPLOY_PATH/current"
-          set -a
-          . "$DEPLOY_PATH/shared/.env"
-          set +a
           bundle exec rake telegram:commands
           REMOTE
 

@@ -8,7 +8,7 @@ require_relative "../prism_hubot/command_menu"
 
 namespace :telegram do
   desc "Publish the command menu to Telegram (setMyCommands)"
-  task :commands do
+  task commands: "env:load" do
     commands = PrismHubot::CommandMenu.telegram_commands
     TelegramBotApiTask.call("setMyCommands", {"commands" => commands})
     puts "Published #{commands.length} commands to the Telegram menu."
@@ -16,7 +16,7 @@ namespace :telegram do
   end
 
   desc "Show the command menu Telegram currently serves (getMyCommands)"
-  task :commands_status do
+  task commands_status: "env:load" do
     published = TelegramBotApiTask.call("getMyCommands", {}).fetch("result", [])
     if published.empty?
       puts "Telegram serves no commands for this bot. Run `rake telegram:commands`."
@@ -26,7 +26,7 @@ namespace :telegram do
   end
 
   desc "Point Telegram at this deployment's webhook (setWebhook)"
-  task :webhook do
+  task webhook: "env:load" do
     url = ENV["PRISM_HUBOT_WEBHOOK_URL"].to_s
     secret = ENV["PRISM_BOT_TELEGRAM_WEBHOOK_SECRET"].to_s
     if url.empty?
@@ -47,7 +47,7 @@ namespace :telegram do
   end
 
   desc "Show what Telegram knows about the webhook (getWebhookInfo)"
-  task :webhook_status do
+  task webhook_status: "env:load" do
     info = TelegramBotApiTask.call("getWebhookInfo", {}).fetch("result", {})
     url = String(info["url"])
     if url.empty?
@@ -72,7 +72,7 @@ module TelegramBotApiTask
   def call(method, payload)
     token = ENV["PRISM_BOT_TELEGRAM_TOKEN"].to_s
     if token.empty?
-      abort "PRISM_BOT_TELEGRAM_TOKEN is not set. Source the deployment .env before running this task."
+      abort "PRISM_BOT_TELEGRAM_TOKEN is not set. `rake env:check` reports what the deployment .env defines."
     end
 
     response = Net::HTTP.post(

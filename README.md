@@ -40,6 +40,8 @@ set -a && source .env && set +a
 bundle exec rackup config.ru -s Puma -p 9292
 ```
 
+The `source` line is a local convenience. On the VPS the same file is read by systemd as an `EnvironmentFile=`, which parses rather than executes it, so keep values quoted instead of shell-escaped, and check what systemd would take from the file with `bundle exec rake env:check`. The rake tasks below read it through that same parser; see [docs/deploy.md](docs/deploy.md#environment-file).
+
 Configure Telegram to send updates to `/telegram/webhook` using the same webhook secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`; `rake telegram:webhook` registers it from `PRISM_HUBOT_WEBHOOK_URL` and `rake telegram:webhook_status` reports what Telegram knows. `/healthz` is available for process liveness.
 
 ## Configuration

@@ -8,6 +8,7 @@ require "securerandom"
 require "prism_bot"
 
 require_relative "prism_hubot/configuration"
+require_relative "prism_hubot/env_file"
 require_relative "prism_hubot/command_menu"
 require_relative "prism_hubot/copy"
 require_relative "prism_hubot/file_interaction_state_store"
