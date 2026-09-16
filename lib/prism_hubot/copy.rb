@@ -4,17 +4,10 @@ module PrismHubot
   module Copy
     HELP = <<~TEXT.freeze
       Prism Hubot:
-      /start — підключити себе до Prism
-      /context — показати поточний Telegram-контекст
-      /post — створити допис у два кроки
-      /cancel — скасувати поточну дію
-      /channels — доступні канали
-      /status — поточний стан бота
-      /stop — призупинити бота для себе
-      /resume — відновити бота
-      /publish текст — швидка публікація у типові канали
-      /publish [channel-a,channel-b] текст — публікація у вибрані канали
+      #{CommandMenu.help_lines}
 
+      /publish текст — публікація у типові канали.
+      /publish [channel-a,channel-b] текст — публікація у вибрані канали.
       Можна також написати «зробити допис» без команди.
     TEXT
 

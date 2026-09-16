@@ -213,6 +213,18 @@ jobs:
           echo "Health check did not pass: $HEALTHCHECK_URL" >&2
           exit 1
 
+      - name: Sync Telegram command menu
+        run: |
+          set -euo pipefail
+          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH/current"
+          set -a
+          . "$DEPLOY_PATH/shared/.env"
+          set +a
+          bundle exec rake telegram:commands
+          REMOTE
+
       - name: Remove SSH material
         if: always()
         run: rm -rf ~/.ssh
