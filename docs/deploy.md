@@ -69,7 +69,8 @@ when any of these is missing:
 - Ruby `4.0.6` (see `.ruby-version`) and Bundler on the deploy user's `PATH`;
 - `git`, because `aiaiaiai-prism-bot` is a pinned Git dependency;
 - `$SSH_DEPLOYMENT_PATH/shared/.env`, created from `.env.example` with real
-  values. It is never written by CI and never committed;
+  values, in the syntax systemd reads (see [Environment file](#environment-file)).
+  It is never written by CI and never committed;
 - a restart path that needs no TTY — either passwordless `sudo -n systemctl
   restart prism-hubot.service` for the deploy user, or a user unit restarted
   through `DEPLOY_RESTART_COMMAND`.
@@ -77,6 +78,41 @@ when any of these is missing:
 `shared/.env` and `shared/var/interaction-state` hold runtime configuration and
 short-lived interaction state. Keep them owned by the deploy user and not world
 readable; the workflow sets mode `0700` on the state directory.
+
+## Environment file
+
+`shared/.env` is read by systemd as an `EnvironmentFile=`, not by a shell. The
+two are different languages, and the difference is not cosmetic: `bash` executes
+what it reads, so `PRISM_BOT_TELEGRAM_TOKEN=<from-botfather>` is a redirection,
+`SECRET=a|b` is a pipeline, and `URL=$(cat /etc/shadow)` is a command
+substitution. A file the service starts from perfectly well used to abort the
+deployment with `syntax error near unexpected token`.
+
+Nothing in this repository sources that file any more. Deployment tasks read it
+with `PrismHubot::EnvFile`, a transcription of systemd's own parser, so what the
+tasks see is what the running service sees:
+
+- `NAME=value`, one assignment per line; no `export`, and no whitespace around
+  the `=`;
+- `#` or `;` in the first non-blank column starts a comment;
+- single and double quotes protect whitespace, `#` and shell metacharacters, and
+  may span lines; `\` escapes the next character and continues the line at the
+  end of one;
+- trailing whitespace of an unquoted value is dropped;
+- no variable expansion and no command substitution. `$` is a literal `$`.
+
+systemd ignores lines it cannot parse and starts the service without them, which
+looks exactly like a credential that was never set. `Deploy` therefore checks the
+file after installing the release and before repointing `current`, so a bad line
+fails while the previous release is still serving. Run the same check by hand:
+
+```bash
+cd /opt/prism-hubot/current
+bundle exec rake env:check
+```
+
+It prints variable names, never values, and exits non-zero when systemd would
+drop a line, quoting the line number.
 
 ## systemd unit
 
@@ -121,12 +157,13 @@ owned by the bot token, not by the running process: a bot that never calls
 and `/help` is rendered from the same entries, so the menu and the help text
 cannot drift. A test asserts the menu covers exactly the routed commands.
 
-`Deploy` publishes it on every run (`Sync Telegram command menu`), sourcing
-`shared/.env` on the VPS for the token. To do it by hand:
+`Deploy` publishes it on every run (`Sync Telegram command menu`). The task reads
+the token from `.env` in the working directory, which in a release is the symlink
+to `shared/.env`; `PRISM_HUBOT_ENV_FILE` overrides the path, and variables
+already exported into the process win over the file. To do it by hand:
 
 ```bash
 cd /opt/prism-hubot/current
-set -a && . /opt/prism-hubot/shared/.env && set +a
 bundle exec rake telegram:commands         # publish the menu
 bundle exec rake telegram:commands_status  # show what Telegram currently serves
 ```
@@ -146,7 +183,6 @@ Set `PRISM_HUBOT_WEBHOOK_URL` in `shared/.env` to the public HTTPS URL of
 
 ```bash
 cd /opt/prism-hubot/current
-set -a && . /opt/prism-hubot/shared/.env && set +a
 bundle exec rake telegram:webhook         # register it
 bundle exec rake telegram:webhook_status  # url, pending updates, last error
 ```
