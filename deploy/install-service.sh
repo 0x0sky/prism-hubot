@@ -4,14 +4,14 @@
 # Installs the prism-hubot systemd unit on the VPS. Run it once, as root, on the
 # deployment host before the first `Deploy` workflow run. See docs/deploy.md.
 #
-#   sudo DEPLOY_PATH=/srv/prism-hubot DEPLOY_USER=prism ./deploy/install-service.sh
+#   sudo DEPLOY_PATH=/opt/prism-hubot DEPLOY_USER=deploy ./deploy/install-service.sh
 #
 # Re-running the script is safe: it rewrites the unit and reloads systemd.
 
 set -euo pipefail
 
-DEPLOY_PATH="${DEPLOY_PATH:-/srv/prism-hubot}"
-DEPLOY_USER="${DEPLOY_USER:-prism}"
+DEPLOY_PATH="${DEPLOY_PATH:-/opt/prism-hubot}"
+DEPLOY_USER="${DEPLOY_USER:-deploy}"
 BIND_ADDRESS="${BIND_ADDRESS:-127.0.0.1}"
 PORT="${PORT:-9292}"
 BUNDLE_BIN="${BUNDLE_BIN:-}"

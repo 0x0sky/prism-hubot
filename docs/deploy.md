@@ -24,7 +24,7 @@ attached there.
 | `SSH_HOST` | yes | VPS hostname or IP |
 | `SSH_USER` | yes | SSH user that owns the deployment path |
 | `SSH_PRIVATE_KEY` | yes | Private key for that user, full PEM including header and footer |
-| `SSH_DEPLOYMENT_PATH` | yes | Absolute deployment root, for example `/srv/prism-hubot` |
+| `SSH_DEPLOYMENT_PATH` | yes | Absolute deployment root, `/opt/prism-hubot` on the current VPS |
 | `SSH_PORT` | no | SSH port, defaults to `22` |
 | `SSH_KNOWN_HOSTS` | no | Pinned host key. Without it the workflow uses `ssh-keyscan`, which trusts the key presented at deploy time |
 
@@ -36,6 +36,9 @@ attached there.
 | `DEPLOY_HEALTHCHECK_URL` | unset | URL curled from the VPS after restart, for example `http://127.0.0.1:9292/healthz`. Skipped when unset |
 
 ## Remote layout
+
+The current VPS deploys to `/opt/prism-hubot` as the `deploy` user, so the
+defaults below and in `deploy/install-service.sh` use those values.
 
 ```text
 $SSH_DEPLOYMENT_PATH/
@@ -83,7 +86,7 @@ it once on the VPS, as root, from a checkout of this repository, before the
 first deployment:
 
 ```bash
-sudo DEPLOY_PATH=/srv/prism-hubot DEPLOY_USER=prism ./deploy/install-service.sh
+sudo DEPLOY_PATH=/opt/prism-hubot DEPLOY_USER=deploy ./deploy/install-service.sh
 ```
 
 The script substitutes the deployment path, service user, `bundle` path, bind
@@ -94,8 +97,8 @@ enables the unit. It deliberately does not start it: the unit needs
 `$DEPLOY_PATH/current`, which the first `Deploy` run creates. Re-running the
 script is safe.
 
-Overridable environment variables: `DEPLOY_PATH` (`/srv/prism-hubot`),
-`DEPLOY_USER` (`prism`), `BIND_ADDRESS` (`127.0.0.1`), `PORT` (`9292`),
+Overridable environment variables: `DEPLOY_PATH` (`/opt/prism-hubot`),
+`DEPLOY_USER` (`deploy`), `BIND_ADDRESS` (`127.0.0.1`), `PORT` (`9292`),
 `BUNDLE_BIN` (resolved from the deploy user's `PATH`), `UNIT_NAME`
 (`prism-hubot.service`) and `INSTALL_SUDOERS` (`yes`).
 
@@ -109,11 +112,59 @@ repository variable instead. The workflow checks before uploading anything: with
 no `DEPLOY_RESTART_COMMAND` set, it requires `prism-hubot.service` to exist on
 the host and fails with installation instructions when it does not.
 
+## Telegram command menu
+
+The in-app command list (the `/` menu in Telegram clients) is server-side state
+owned by the bot token, not by the running process: a bot that never calls
+`setMyCommands` shows an empty menu no matter how many commands it routes.
+`lib/prism_hubot/command_menu.rb` is the single source of truth for that list,
+and `/help` is rendered from the same entries, so the menu and the help text
+cannot drift. A test asserts the menu covers exactly the routed commands.
+
+`Deploy` publishes it on every run (`Sync Telegram command menu`), sourcing
+`shared/.env` on the VPS for the token. To do it by hand:
+
+```bash
+cd /opt/prism-hubot/current
+set -a && . /opt/prism-hubot/shared/.env && set +a
+bundle exec rake telegram:commands         # publish the menu
+bundle exec rake telegram:commands_status  # show what Telegram currently serves
+```
+
+The menu is per bot token and global, so it applies to every chat at once.
+Telegram clients cache it; an open chat may need a restart to redraw the list.
+
+## Telegram webhook
+
+`prism-bot` serves `/telegram/webhook` but never registers it, so a fresh bot
+token receives nothing until an operator points Telegram at the deployment. An
+unregistered webhook looks exactly like a broken bot: every command is routed
+correctly and no update ever arrives.
+
+Set `PRISM_HUBOT_WEBHOOK_URL` in `shared/.env` to the public HTTPS URL of
+`/telegram/webhook`, then:
+
+```bash
+cd /opt/prism-hubot/current
+set -a && . /opt/prism-hubot/shared/.env && set +a
+bundle exec rake telegram:webhook         # register it
+bundle exec rake telegram:webhook_status  # url, pending updates, last error
+```
+
+Registration is idempotent and is deliberately not part of `Deploy`: the
+public URL belongs to the fronting TLS terminator, not to a release. Re-run it
+when the public URL or the webhook secret changes.
+
+`telegram:webhook` sends `secret_token`, and the process rejects updates whose
+`X-Telegram-Bot-Api-Secret-Token` header does not match
+`PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. A `last_error_message` of `403` in
+`webhook_status` therefore means the two have drifted apart.
+
 ## Rollback
 
 ```bash
-ln -sfn "$DEPLOY_PATH/releases/<previous-sha>" "$DEPLOY_PATH/current.tmp"
-mv -T "$DEPLOY_PATH/current.tmp" "$DEPLOY_PATH/current"
+ln -sfn "/opt/prism-hubot/releases/<previous-sha>" "$DEPLOY_PATH/current.tmp"
+mv -T "/opt/prism-hubot/current.tmp" "/opt/prism-hubot/current"
 sudo systemctl restart prism-hubot.service
 ```
 

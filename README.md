@@ -40,7 +40,7 @@ set -a && source .env && set +a
 bundle exec rackup config.ru -s Puma -p 9292
 ```
 
-Configure Telegram to send updates to `/telegram/webhook` using the same webhook secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. `/healthz` is available for process liveness.
+Configure Telegram to send updates to `/telegram/webhook` using the same webhook secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`; `rake telegram:webhook` registers it from `PRISM_HUBOT_WEBHOOK_URL` and `rake telegram:webhook_status` reports what Telegram knows. `/healthz` is available for process liveness.
 
 ## Configuration
 
@@ -84,7 +84,7 @@ See [`docs/architecture.md`](docs/architecture.md) for ownership, state-persiste
 
 ## Deployment
 
-`Deploy` is manual-only and accepts an optional `ref` to release to the single VPS over SSH. Merging to `master` runs verification workflows but does not deploy. The systemd unit is shipped with the repository (`deploy/prism-hubot.service`) and installed on the VPS once with `deploy/install-service.sh`. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
+`Deploy` is manual-only and accepts an optional `ref` to release to the single VPS over SSH. Merging to `master` runs verification workflows but does not deploy. The systemd unit is shipped with the repository (`deploy/prism-hubot.service`) and installed on the VPS once with `deploy/install-service.sh`. The Telegram command menu is published from `lib/prism_hubot/command_menu.rb` by `rake telegram:commands`, which `Deploy` runs on every release. See [`docs/deploy.md`](docs/deploy.md) for the required secrets, remote layout, and server prerequisites.
 
 ## Verification
 

@@ -58,24 +58,6 @@ jobs:
             *) echo "SSH_DEPLOYMENT_PATH must be an absolute path." >&2; exit 1 ;;
           esac
 
-      - name: Diagnose SSH target
-        run: |
-          set -euo pipefail
-          port="${SSH_PORT:-22}"
-          echo "SSH target matches expected hostname: $([[ "$SSH_HOST" == "prism.aiaiaiai.org" ]] && echo yes || echo no)"
-          echo "SSH target matches expected IPv4: $([[ "$SSH_HOST" == "62.238.19.244" ]] && echo yes || echo no)"
-          echo "Resolved IPv4 addresses:"
-          getent ahostsv4 "$SSH_HOST" || true
-          echo "Resolved IPv6 addresses:"
-          getent ahostsv6 "$SSH_HOST" || true
-          echo "Testing TCP $port from GitHub runner..."
-          if timeout 5 bash -c "</dev/tcp/$SSH_HOST/$port"; then
-            echo "TCP $port reachable from GitHub runner."
-          else
-            echo "TCP $port NOT reachable from GitHub runner." >&2
-            exit 1
-          fi
-
       - name: Configure SSH client
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -212,6 +194,18 @@ jobs:
           done
           echo "Health check did not pass: $HEALTHCHECK_URL" >&2
           exit 1
+
+      - name: Sync Telegram command menu
+        run: |
+          set -euo pipefail
+          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH/current"
+          set -a
+          . "$DEPLOY_PATH/shared/.env"
+          set +a
+          bundle exec rake telegram:commands
+          REMOTE
 
       - name: Remove SSH material
         if: always()
