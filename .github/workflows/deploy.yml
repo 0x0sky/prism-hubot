@@ -106,8 +106,8 @@ jobs:
           set -euo pipefail
           ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
-          mkdir -p "$DEPLOY_PATH/releases" "$DEPLOY_PATH/shared/var/interaction-state" "$DEPLOY_PATH/shared/bundle"
-          chmod 700 "$DEPLOY_PATH/shared/var/interaction-state"
+          mkdir -p "$DEPLOY_PATH/releases" "$DEPLOY_PATH/shared/var/interaction-state" "$DEPLOY_PATH/shared/var/delivery-idempotency" "$DEPLOY_PATH/shared/bundle"
+          chmod 700 "$DEPLOY_PATH/shared/var/interaction-state" "$DEPLOY_PATH/shared/var/delivery-idempotency"
           if [ ! -f "$DEPLOY_PATH/shared/.env" ]; then
             echo "Missing $DEPLOY_PATH/shared/.env on the VPS." >&2
             echo "Create it from .env.example with real runtime values, then re-run this workflow." >&2
@@ -155,6 +155,7 @@ jobs:
           ln -sfn "$DEPLOY_PATH/shared/.env" "$release_dir/.env"
           mkdir -p "$release_dir/var"
           ln -sfn "$DEPLOY_PATH/shared/var/interaction-state" "$release_dir/var/interaction-state"
+          ln -sfn "$DEPLOY_PATH/shared/var/delivery-idempotency" "$release_dir/var/delivery-idempotency"
 
           cd "$release_dir"
           bundle config set --local deployment true

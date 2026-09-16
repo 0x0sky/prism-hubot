@@ -48,6 +48,7 @@ $SSH_DEPLOYMENT_PATH/
     .env
     bundle/
     var/interaction-state/
+    var/delivery-idempotency/
 ```
 
 Release directories are named by the commit actually checked out for that run,
@@ -55,11 +56,12 @@ resolved with `git rev-parse HEAD` after checkout. A manual deployment of a
 non-default `ref` therefore lands under its own commit and cannot overwrite an
 unrelated release.
 
-The workflow creates `releases/`, `shared/bundle/`, and
-`shared/var/interaction-state/` on first run. Each release symlinks
-`.env` and `var/interaction-state` into `shared/`, so conversational state
-survives releases as `PRISM_HUBOT_INTERACTION_STATE_DIR` requires. The five most
-recent releases are kept.
+The workflow creates `releases/`, `shared/bundle/`, `shared/var/interaction-state/`,
+and `shared/var/delivery-idempotency/` on first run. Each release symlinks `.env`
+and both `var/` directories into `shared/`, so conversational state and delivery
+idempotency records survive releases as `PRISM_HUBOT_INTERACTION_STATE_DIR` and
+`PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR` require. The five most recent releases are
+kept.
 
 ## Server prerequisites
 
@@ -75,9 +77,9 @@ when any of these is missing:
   restart prism-hubot.service` for the deploy user, or a user unit restarted
   through `DEPLOY_RESTART_COMMAND`.
 
-`shared/.env` and `shared/var/interaction-state` hold runtime configuration and
-short-lived interaction state. Keep them owned by the deploy user and not world
-readable; the workflow sets mode `0700` on the state directory.
+`shared/.env` and both `shared/var/` directories hold runtime configuration and
+short-lived state. Keep them owned by the deploy user and not world readable;
+the workflow sets mode `0700` on both directories.
 
 ## Environment file
 
@@ -195,6 +197,53 @@ when the public URL or the webhook secret changes.
 `X-Telegram-Bot-Api-Secret-Token` header does not match
 `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. A `last_error_message` of `403` in
 `webhook_status` therefore means the two have drifted apart.
+
+## Receiving Hub deliveries
+
+Prism Hub can schedule content — mail digests today — for a Telegram surface
+this deployment already exposes, without going through `/telegram/webhook` or
+any command: its delivery worker resolves a `TelegramSurfaceBinding`, renders
+the content through Porter, and pushes each rendered chunk straight to
+`POST /api/v1/delivery` on this deployment's public origin
+(`PrismHub::Adapters::HttpBotDeliveryGateway`, configured there as
+`PRISM_BOT_ORIGIN`).
+
+This client only relays what Hub already decided to send; it does not decide
+what gets sent, to whom, or on what schedule — that stays entirely Hub-owned,
+same as channels and identity. Setting `PRISM_BOT_DELIVERY_SECRET` in
+`shared/.env` is what opts this deployment into the integration:
+
+```text
+#PRISM_BOT_DELIVERY_SECRET=replace-with-at-least-16-random-characters
+#PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR=var/delivery-idempotency
+#PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS=86400
+#PRISM_HUBOT_DELIVERY_MAX_BODY_BYTES=65536
+```
+
+Leave it unset and nothing changes: `config.ru` mounts no `/api/v1/delivery`
+route at all, so there is nothing for an unconfigured Hub deployment to reach
+and nothing for an attacker to probe. Set it and it must equal, byte for byte,
+whatever Hub's own `PRISM_BOT_DELIVERY_SECRET` is configured with — that is the
+only credential authenticating this endpoint; there is no per-request Telegram
+or Hub identity check here, by design, because Hub already did that resolution
+before it ever calls in.
+
+Every request must carry the matching `x-prism-bot-delivery-secret` header and
+a `chat_id`/`text`/`idempotency_key` (and optional `message_thread_id`) JSON
+body; anything else is `401`/`415`/`400`. A successful relay to Telegram is
+remembered by `idempotency_key` under `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR`
+for `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS` (default one day), so a
+retried delivery — Hub retries on timeout or on a `5xx`/`429` response, which
+includes the case where this client reached Telegram but the acknowledgement
+never made it back to Hub — returns the original `provider_message_id` instead
+of posting the same chunk twice. Like `var/interaction-state`, this directory
+is short-lived client bookkeeping, not business data: losing it only risks an
+occasional duplicate message on an unlucky retry, never a wrong delivery.
+
+A `429` from Telegram is reported back as `429` with `retry_after_seconds`, so
+Hub's own backoff applies; anything else Telegram rejects is reported as `502`
+so Hub retries; a malformed request from Hub itself is `400` and is not
+retried, since Hub is expected to always send a well-formed request.
 
 ## Rollback
 

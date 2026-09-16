@@ -25,6 +25,31 @@ module PrismHubotTestSupport
     end
   end
 
+  class FakeOutboundDelivery
+    attr_reader :calls
+
+    def initialize(result: nil, error: nil)
+      @result = result
+      @error = error
+      @calls = []
+    end
+
+    def deliver_message(chat_id:, text:, idempotency_key:, message_thread_id: nil)
+      @calls << {
+        chat_id: chat_id,
+        text: text,
+        idempotency_key: idempotency_key,
+        message_thread_id: message_thread_id
+      }
+      raise @error if @error
+
+      @result || PrismBot::Domain::DeliveryResult.new(
+        provider_message_id: 42,
+        idempotency_key: idempotency_key
+      )
+    end
+  end
+
   class MessageSender
     attr_reader :messages
 
