@@ -40,7 +40,7 @@ set -a && source .env && set +a
 bundle exec rackup config.ru -s Puma -p 9292
 ```
 
-Configure Telegram to send updates to `/telegram/webhook` using the same webhook secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. `/healthz` is available for process liveness.
+Configure Telegram to send updates to `/telegram/webhook` using the same webhook secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`; `rake telegram:webhook` registers it from `PRISM_HUBOT_WEBHOOK_URL` and `rake telegram:webhook_status` reports what Telegram knows. `/healthz` is available for process liveness.
 
 ## Configuration
 

@@ -136,10 +136,29 @@ Telegram clients cache it; an open chat may need a restart to redraw the list.
 
 ## Telegram webhook
 
-Neither this repository nor `prism-bot` registers the webhook — the process only
-serves it. Point Telegram at the public `/telegram/webhook` URL once, with the
-same secret as `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`, and verify with
-`getWebhookInfo` if updates do not arrive.
+`prism-bot` serves `/telegram/webhook` but never registers it, so a fresh bot
+token receives nothing until an operator points Telegram at the deployment. An
+unregistered webhook looks exactly like a broken bot: every command is routed
+correctly and no update ever arrives.
+
+Set `PRISM_HUBOT_WEBHOOK_URL` in `shared/.env` to the public HTTPS URL of
+`/telegram/webhook`, then:
+
+```bash
+cd /opt/prism-hubot/current
+set -a && . /opt/prism-hubot/shared/.env && set +a
+bundle exec rake telegram:webhook         # register it
+bundle exec rake telegram:webhook_status  # url, pending updates, last error
+```
+
+Registration is idempotent and is deliberately not part of `Deploy`: the
+public URL belongs to the fronting TLS terminator, not to a release. Re-run it
+when the public URL or the webhook secret changes.
+
+`telegram:webhook` sends `secret_token`, and the process rejects updates whose
+`X-Telegram-Bot-Api-Secret-Token` header does not match
+`PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. A `last_error_message` of `403` in
+`webhook_status` therefore means the two have drifted apart.
 
 ## Rollback
 
