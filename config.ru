@@ -30,7 +30,8 @@ if delivery_configuration
     outbound_delivery: outbound_delivery,
     idempotency_store: PrismHubot::DeliveryIdempotencyStore.new(
       directory: delivery_configuration.idempotency_directory,
-      ttl_seconds: delivery_configuration.idempotency_ttl_seconds
+      ttl_seconds: delivery_configuration.idempotency_ttl_seconds,
+      reservation_ttl_seconds: delivery_configuration.reservation_ttl_seconds
     ),
     max_body_bytes: delivery_configuration.max_body_bytes,
     logger: Logger.new($stdout)

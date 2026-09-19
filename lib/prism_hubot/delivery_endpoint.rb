@@ -6,7 +6,8 @@ module PrismHubot
   # resolves a `TelegramSurfaceBinding`, renders chunks through Porter, and
   # pushes each chunk here to be relayed to Telegram — this client never
   # decides what gets sent or to whom, only that the caller is Hub and that
-  # each chunk reaches Telegram at most once.
+  # each chunk is not knowingly relayed twice (see `DeliveryIdempotencyStore`
+  # for the one crash window that best-effort claim cannot close).
   #
   # This is a separate Rack app from `PrismBot::Channels::Telegram::WebhookApp`
   # (mounted at a different path by `config.ru`), not a route added to it: the
@@ -46,51 +47,61 @@ module PrismHubot
         return response(413, "status" => "error", "error" => {"code" => "prism_hubot.delivery.payload.too_large"})
       end
 
-      deliver(JSON.parse(source))
+      chat_id, message_thread_id, text, idempotency_key = validate!(JSON.parse(source))
+      deliver(chat_id: chat_id, message_thread_id: message_thread_id, text: text, idempotency_key: idempotency_key)
     rescue KeyError
       response(400, "status" => "error", "error" => {"code" => "prism_hubot.delivery.request.invalid"})
     rescue JSON::ParserError
       response(400, "status" => "error", "error" => {"code" => "prism_hubot.delivery.json.invalid"})
+    rescue PrismBot::InputError => error
+      # From this endpoint's own `validate!`, before any reservation exists —
+      # the deeper InputError that `deliver_message` itself can raise is
+      # handled inside `deliver`, where releasing the reservation applies.
+      response(400, "status" => "error", "error" => {"code" => error.code})
     end
 
     private
 
-    def deliver(payload)
-      chat_id, message_thread_id, text, idempotency_key = validate!(payload)
+    # idempotency_key is already known here, so every rescue clause releases
+    # whatever reservation `reserve` made before re-raising as a response:
+    # a failure this process actually observed must not block a prompt retry
+    # for the full reservation_ttl_seconds the way an unobserved crash would.
+    def deliver(chat_id:, message_thread_id:, text:, idempotency_key:)
+      reservation = @idempotency_store.reserve(idempotency_key: idempotency_key)
+      if reservation.completed?
+        return success(idempotency_key, reservation.provider_message_id)
+      elsif reservation.in_progress?
+        return response(409, "status" => "error", "error" => {"code" => "prism_hubot.delivery.in_progress"})
+      end
 
-      cached = @idempotency_store.fetch(idempotency_key: idempotency_key)
-      provider_message_id = cached || perform_delivery(
-        chat_id: chat_id,
-        message_thread_id: message_thread_id,
-        text: text,
-        idempotency_key: idempotency_key
-      )
-
-      response(200, "status" => "ok", "delivery" => {
-        "idempotency_key" => idempotency_key,
-        "provider_message_id" => provider_message_id
-      })
-    rescue PrismBot::InputError => error
-      response(400, "status" => "error", "error" => {"code" => error.code})
-    rescue PrismBot::DeliveryRateLimited => error
-      response(429, "status" => "error", "error" => {
-        "code" => error.code,
-        "retry_after_seconds" => error.retry_after_seconds
-      })
-    rescue PrismBot::Error => error
-      @logger.warn("prism_hubot_delivery upstream_error code=#{error.code}")
-      response(502, "status" => "error", "error" => {"code" => error.code})
-    end
-
-    def perform_delivery(chat_id:, message_thread_id:, text:, idempotency_key:)
       result = @outbound_delivery.deliver_message(
         chat_id: chat_id,
         text: text,
         message_thread_id: message_thread_id,
         idempotency_key: idempotency_key
       )
-      @idempotency_store.store(idempotency_key: idempotency_key, provider_message_id: result.provider_message_id)
-      result.provider_message_id
+      @idempotency_store.complete!(idempotency_key: idempotency_key, provider_message_id: result.provider_message_id)
+      success(idempotency_key, result.provider_message_id)
+    rescue PrismBot::InputError => error
+      @idempotency_store.release(idempotency_key: idempotency_key)
+      response(400, "status" => "error", "error" => {"code" => error.code})
+    rescue PrismBot::DeliveryRateLimited => error
+      @idempotency_store.release(idempotency_key: idempotency_key)
+      response(429, "status" => "error", "error" => {
+        "code" => error.code,
+        "retry_after_seconds" => error.retry_after_seconds
+      })
+    rescue PrismBot::Error => error
+      @idempotency_store.release(idempotency_key: idempotency_key)
+      @logger.warn("prism_hubot_delivery upstream_error code=#{error.code}")
+      response(502, "status" => "error", "error" => {"code" => error.code})
+    end
+
+    def success(idempotency_key, provider_message_id)
+      response(200, "status" => "ok", "delivery" => {
+        "idempotency_key" => idempotency_key,
+        "provider_message_id" => provider_message_id
+      })
     end
 
     def validate!(payload)

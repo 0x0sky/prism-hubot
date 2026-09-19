@@ -9,9 +9,16 @@ module PrismHubot
   class DeliveryConfiguration
     DEFAULT_IDEMPOTENCY_DIRECTORY = "var/delivery-idempotency".freeze
     DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86_400
+    # How long a delivery attempt may hold its reservation before a retry may
+    # steal it. Only needs to outlast a genuine in-flight attempt to Telegram
+    # (bounded by NetHttpTransport's open + read timeouts, seconds not
+    # minutes); see DeliveryIdempotencyStore for what a crash inside that
+    # window still costs.
+    DEFAULT_RESERVATION_TTL_SECONDS = 30
     DEFAULT_MAX_BODY_BYTES = 65_536
 
-    attr_reader :secret, :idempotency_directory, :idempotency_ttl_seconds, :max_body_bytes
+    attr_reader :secret, :idempotency_directory, :idempotency_ttl_seconds,
+      :reservation_ttl_seconds, :max_body_bytes
 
     def self.from_environment(environment)
       raw_secret = String(environment["PRISM_BOT_DELIVERY_SECRET"]).strip
@@ -27,6 +34,10 @@ module PrismHubot
           "PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS",
           DEFAULT_IDEMPOTENCY_TTL_SECONDS.to_s
         ),
+        reservation_ttl_seconds: environment.fetch(
+          "PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS",
+          DEFAULT_RESERVATION_TTL_SECONDS.to_s
+        ),
         max_body_bytes: environment.fetch(
           "PRISM_HUBOT_DELIVERY_MAX_BODY_BYTES",
           DEFAULT_MAX_BODY_BYTES.to_s
@@ -34,12 +45,16 @@ module PrismHubot
       )
     end
 
-    def initialize(secret:, idempotency_directory:, idempotency_ttl_seconds:, max_body_bytes:)
+    def initialize(secret:, idempotency_directory:, idempotency_ttl_seconds:, reservation_ttl_seconds:, max_body_bytes:)
       @secret = DeliverySecret.new(secret)
       @idempotency_directory = resolve_directory(idempotency_directory)
       @idempotency_ttl_seconds = positive_integer(
         idempotency_ttl_seconds,
         "PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS"
+      )
+      @reservation_ttl_seconds = positive_integer(
+        reservation_ttl_seconds,
+        "PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS"
       )
       @max_body_bytes = positive_integer(max_body_bytes, "PRISM_HUBOT_DELIVERY_MAX_BODY_BYTES")
       freeze

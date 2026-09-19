@@ -217,6 +217,7 @@ same as channels and identity. Setting `PRISM_BOT_DELIVERY_SECRET` in
 #PRISM_BOT_DELIVERY_SECRET=replace-with-at-least-16-random-characters
 #PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR=var/delivery-idempotency
 #PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS=86400
+#PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS=30
 #PRISM_HUBOT_DELIVERY_MAX_BODY_BYTES=65536
 ```
 
@@ -230,15 +231,39 @@ before it ever calls in.
 
 Every request must carry the matching `x-prism-bot-delivery-secret` header and
 a `chat_id`/`text`/`idempotency_key` (and optional `message_thread_id`) JSON
-body; anything else is `401`/`415`/`400`. A successful relay to Telegram is
-remembered by `idempotency_key` under `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR`
-for `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS` (default one day), so a
-retried delivery — Hub retries on timeout or on a `5xx`/`429` response, which
-includes the case where this client reached Telegram but the acknowledgement
-never made it back to Hub — returns the original `provider_message_id` instead
-of posting the same chunk twice. Like `var/interaction-state`, this directory
-is short-lived client bookkeeping, not business data: losing it only risks an
-occasional duplicate message on an unlucky retry, never a wrong delivery.
+body; anything else is `401`/`415`/`400`.
+
+### Duplicate suppression is best-effort, not exactly-once
+
+Telegram's Bot API has no client-supplied idempotency key of its own: once a
+chunk is sent, there is no way to ask Telegram "did I already send this?",
+only this client's own record of having tried. Each `idempotency_key` moves
+through a small reservation under `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR`:
+
+- a request atomically claims the key before calling Telegram, so a second
+  request for the same key arriving while the first is still in flight — a
+  real possibility, since Hub's own lease can expire and retry while this
+  client's call to Telegram is still outstanding — sees the reservation and
+  answers `409` instead of also calling Telegram; Hub's normal retry/backoff
+  handles the `409` like any other transient failure;
+- a completed delivery is remembered for `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS`
+  (default one day) and replayed on retry instead of calling Telegram again;
+- a delivery attempt that fails in a way this process observes (Telegram
+  rejects it, rate-limits it) releases its reservation immediately, so the
+  next retry is not made to wait.
+
+What this cannot close: if the process dies — a normal `Deploy` restart counts
+— between Telegram accepting a chunk and that fact being recorded, the
+reservation is orphaned. A retry for that key waits out
+`PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS` (default 30s, sized to outlast
+one real attempt to Telegram, not to survive a crash) and then reclaims it,
+which can duplicate that one message. No file-based store on this side can
+close that window to zero; a lower TTL narrows it at the cost of occasionally
+reclaiming a reservation while it is still genuinely in flight.
+
+Like `var/interaction-state`, this directory is short-lived client
+bookkeeping, not business data: losing it entirely only risks a duplicate
+message on the next retry, never a wrong delivery.
 
 A `429` from Telegram is reported back as `429` with `retry_after_seconds`, so
 Hub's own backoff applies; anything else Telegram rejects is reported as `502`

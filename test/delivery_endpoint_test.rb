@@ -67,6 +67,17 @@ class DeliveryEndpointTest < Minitest::Test
     assert_equal "prism_hubot.delivery.thread.invalid", parse(body).dig("error", "code")
   end
 
+  def test_a_request_rejected_before_reservation_never_touches_the_idempotency_store
+    Dir.mktmpdir do |directory|
+      idempotency_store = build_idempotency_store(directory)
+      endpoint = build_endpoint(outbound_delivery: PrismHubotTestSupport::FakeOutboundDelivery.new, idempotency_store: idempotency_store)
+
+      endpoint.call(rack_env(payload: {"chat_id" => 1, "text" => "hi"})) # missing idempotency_key
+
+      assert_empty Dir.children(directory)
+    end
+  end
+
   def test_successful_delivery
     outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new
     status, _headers, body = call_endpoint(outbound_delivery: outbound_delivery, payload: default_payload)
@@ -81,11 +92,10 @@ class DeliveryEndpointTest < Minitest::Test
     )
   end
 
-  def test_repeated_idempotency_key_is_not_redelivered
+  def test_repeated_idempotency_key_replays_the_completed_result
     outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new
     Dir.mktmpdir do |directory|
-      idempotency_store = PrismHubot::DeliveryIdempotencyStore.new(directory: directory, ttl_seconds: 900)
-      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: idempotency_store)
+      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: build_idempotency_store(directory))
 
       first_status, _headers, first_body = endpoint.call(rack_env(payload: default_payload))
       second_status, _headers, second_body = endpoint.call(rack_env(payload: default_payload))
@@ -94,6 +104,41 @@ class DeliveryEndpointTest < Minitest::Test
       assert_equal 200, second_status
       assert_equal parse(first_body), parse(second_body)
       assert_equal 1, outbound_delivery.calls.length
+    end
+  end
+
+  # The race the review flagged: a second request for the same key arriving
+  # while the first is still in flight must not also call Telegram.
+  def test_concurrent_duplicate_is_reported_as_conflict_without_a_second_telegram_call
+    outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new
+    Dir.mktmpdir do |directory|
+      idempotency_store = build_idempotency_store(directory)
+      idempotency_store.reserve(idempotency_key: "digest-chunk-1") # simulates the first request already in flight
+      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: idempotency_store)
+
+      status, _headers, body = endpoint.call(rack_env(payload: default_payload))
+
+      assert_equal 409, status
+      assert_equal "prism_hubot.delivery.in_progress", parse(body).dig("error", "code")
+      assert_empty outbound_delivery.calls
+    end
+  end
+
+  # A reservation left behind by a request that failed in a way this process
+  # actually observed (as opposed to a crash) must not block a prompt retry.
+  def test_a_released_reservation_lets_the_next_attempt_call_telegram
+    outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new(
+      error: PrismBot::MessageDeliveryError.new("bot.telegram.unavailable", "Telegram is unavailable")
+    )
+    Dir.mktmpdir do |directory|
+      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: build_idempotency_store(directory))
+
+      first_status, = endpoint.call(rack_env(payload: default_payload))
+      second_status, = endpoint.call(rack_env(payload: default_payload))
+
+      assert_equal 502, first_status
+      assert_equal 502, second_status
+      assert_equal 2, outbound_delivery.calls.length
     end
   end
 
@@ -142,6 +187,10 @@ class DeliveryEndpointTest < Minitest::Test
     }
   end
 
+  def build_idempotency_store(directory)
+    PrismHubot::DeliveryIdempotencyStore.new(directory: directory, ttl_seconds: 900, reservation_ttl_seconds: 30)
+  end
+
   def build_endpoint(outbound_delivery:, idempotency_store:, max_body_bytes: 65_536)
     PrismHubot::DeliveryEndpoint.new(
       secret: PrismHubot::DeliverySecret.new(SECRET_VALUE),
@@ -158,10 +207,9 @@ class DeliveryEndpointTest < Minitest::Test
     **request_options
   )
     Dir.mktmpdir do |directory|
-      idempotency_store = PrismHubot::DeliveryIdempotencyStore.new(directory: directory, ttl_seconds: 900)
       endpoint = build_endpoint(
         outbound_delivery: outbound_delivery,
-        idempotency_store: idempotency_store,
+        idempotency_store: build_idempotency_store(directory),
         max_body_bytes: max_body_bytes
       )
       endpoint.call(rack_env(**request_options))
