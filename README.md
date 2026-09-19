@@ -59,6 +59,8 @@ Configure Telegram to send updates to `/telegram/webhook` using the same webhook
 
 Channel IDs remain empty until Hub exposes the concrete accounts/channels this client may publish to.
 
+Setting `PRISM_BOT_DELIVERY_SECRET` mounts an additional, optional `POST /api/v1/delivery`: the receiving side of Prism Hub's delivery worker, which pushes content Hub already scheduled for a Hub-bound Telegram surface (mail digests today) so this client can relay it. Left unset, no such route exists. See [docs/deploy.md#receiving-hub-deliveries](docs/deploy.md#receiving-hub-deliveries).
+
 ### Rename migration
 
 The Ruby entry point is `lib/prism_hubot`, with the `PrismHubot` namespace. Client-owned environment variables use `PRISM_HUBOT_INTERACTION_STATE_DIR` and `PRISM_HUBOT_INTERACTION_STATE_TTL_SECONDS`; previous names have no compatibility aliases. Shared `PRISM_BOT_*` and `PRISM_HUB_*` variables keep their existing contract.

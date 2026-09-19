@@ -1,83 +1,94 @@
 # Deployment
 
-`prism-hubot` deploys to a single VPS over SSH with the `Deploy` workflow
-(`.github/workflows/deploy.yml`). The workflow is release-directory based: each
-deployment lands in its own directory, shared runtime state stays outside the
-release, and `current` is repointed atomically.
+`prism-hubot` is deployed through the canonical `aiaiaiai-org/infra`
+repository. This repository's Deploy workflow never opens SSH to a VPS and
+does not contain the target host, user, private key, port, or deployment path.
+
+The release remains directory-based: infra checks out the requested commit,
+archives that exact source tree, installs it under the contracted
+`/opt/prism-hubot` path, preserves shared runtime state, atomically repoints
+`current`, restarts `prism-hubot.service`, and verifies that the unit remains
+active. The target, path, service name, and release retention are all resolved
+from the merged workload contract in infra.
 
 ## Trigger
 
 - manually via `workflow_dispatch`, optionally with an explicit `ref`.
 
 Deploy is deliberately not triggered by merges or CI completion. Merging to
-`master` runs the normal verification workflows only; an operator explicitly
-starts `Deploy` and selects the ref to release.
+`master` runs normal verification only; an operator explicitly starts Deploy
+and selects the ref to release.
 
-Deployments are serialised through the `deploy-vps` concurrency group and run in
-the `production` environment, so required reviewers or branch restrictions can be
+The workflow dispatches `deploy-workload` to `aiaiaiai-org/infra`. Infra then
+selects the target GitHub Environment from the workload contract and reuses that
+environment's machine credentials. GitHub's repository-dispatch API requires a credential with Contents write access
+to the target repository; that credential is the only deployment secret kept
+here and it grants no SSH access.
+
+Deployments are serialised through the `deploy-vps` concurrency group and run
+in the `production` environment, so approval or branch restrictions can be
 attached there.
 
 ## Repository secrets
 
 | Secret | Required | Meaning |
 | --- | --- | --- |
-| `SSH_HOST` | yes | VPS hostname or IP |
-| `SSH_USER` | yes | SSH user that owns the deployment path |
-| `SSH_PRIVATE_KEY` | yes | Private key for that user, full PEM including header and footer |
-| `SSH_DEPLOYMENT_PATH` | yes | Absolute deployment root, `/opt/prism-hubot` on the current VPS |
-| `SSH_PORT` | no | SSH port, defaults to `22` |
-| `SSH_KNOWN_HOSTS` | no | Pinned host key. Without it the workflow uses `ssh-keyscan`, which trusts the key presented at deploy time |
+| `INFRA_DEPLOY_TOKEN` | yes | GitHub credential allowed to create `repository_dispatch` events in `aiaiaiai-org/infra` |
 
-## Repository variables
+No `SSH_*` secret belongs in this repository.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DEPLOY_RESTART_COMMAND` | `sudo -n systemctl restart prism-hubot.service` | Command run over SSH after the release is installed |
-| `DEPLOY_HEALTHCHECK_URL` | unset | URL curled from the VPS after restart, for example `http://127.0.0.1:9292/healthz`. Skipped when unset |
+## Deployment contract
+
+The current infra contract resolves:
+
+| Property | Contract |
+| --- | --- |
+| Workload | `prism-hubot` |
+| Repository | `aiaiaiai-org/prism-hubot` |
+| Runtime | `systemd-release` |
+| Target | `edge-prod-1` |
+| Deployment path | `/opt/prism-hubot` |
+| Service | `prism-hubot.service` |
+| Release retention | `5` |
+| Post-activation hook | `bundle exec rake telegram:commands` |
+
+The target's `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, and optional
+`SSH_PORT) are owned only by the corresponding GitHub Environment in infra.
+The product repository supplies only the requested release ref.
 
 ## Remote layout
 
-The current VPS deploys to `/opt/prism-hubot` as the `deploy` user, so the
-defaults below and in `deploy/install-service.sh` use those values.
+The release runtime uses:
 
 ```text
-$SSH_DEPLOYMENT_PATH/
+/opt/prism-hubot/
   current -> releases/<sha>
   releases/<sha>/
   shared/
     .env
     bundle/
     var/interaction-state/
+    var/delivery-idempotency/
 ```
 
-Release directories are named by the commit actually checked out for that run,
-resolved with `git rev-parse HEAD` after checkout. A manual deployment of a
-non-default `ref` therefore lands under its own commit and cannot overwrite an
-unrelated release.
-
-The workflow creates `releases/`, `shared/bundle/`, and
-`shared/var/interaction-state/` on first run. Each release symlinks
-`.env` and `var/interaction-state` into `shared/`, so conversational state
-survives releases as `PRISM_HUBOT_INTERACTION_STATE_DIR` requires. The five most
-recent releases are kept.
+`shared/.env` and both state directories survive releases. The release
+retention policy is owned by the infra contract, not by a product-repository
+secret or variable.
 
 ## Server prerequisites
 
-The workflow does not provision the machine. It fails with an explicit message
-when any of these is missing:
+Infra does not provision the machine. Before the first deployment the target
+must already have:
 
-- Ruby `4.0.6` (see `.ruby-version`) and Bundler on the deploy user's `PATH`;
+- Ruby `4.0.6` and Bundler on the deploy user's `PATH`;
 - `git`, because `aiaiaiai-prism-bot` is a pinned Git dependency;
-- `$SSH_DEPLOYMENT_PATH/shared/.env`, created from `.env.example` with real
-  values, in the syntax systemd reads (see [Environment file](#environment-file)).
-  It is never written by CI and never committed;
-- a restart path that needs no TTY — either passwordless `sudo -n systemctl
-  restart prism-hubot.service` for the deploy user, or a user unit restarted
-  through `DEPLOY_RESTART_COMMAND`.
+- `/opt/prism-hubot/shared/.env`, containing the real runtime values and never
+  committed to Git;
+- `prism-hubot.service` installed and restartable by the deploy user through
+  passwordless `sudo -n systemctl`.
 
-`shared/.env` and `shared/var/interaction-state` hold runtime configuration and
-short-lived interaction state. Keep them owned by the deploy user and not world
-readable; the workflow sets mode `0700` on the state directory.
+The existing `deploy/install-service.sh` remains the provisioning tool for the
+systemd unit. It is intentionally separate from release deployment.
 
 ## Environment file
 
@@ -157,7 +168,7 @@ owned by the bot token, not by the running process: a bot that never calls
 and `/help` is rendered from the same entries, so the menu and the help text
 cannot drift. A test asserts the menu covers exactly the routed commands.
 
-`Deploy` publishes it on every run (`Sync Telegram command menu`). The task reads
+`infra` runs the contracted post-activation hook (`bundle exec rake telegram:commands`) after the new release is active. The task reads
 the token from `.env` in the working directory, which in a release is the symlink
 to `shared/.env`; `PRISM_HUBOT_ENV_FILE` overrides the path, and variables
 already exported into the process win over the file. To do it by hand:
@@ -195,6 +206,78 @@ when the public URL or the webhook secret changes.
 `X-Telegram-Bot-Api-Secret-Token` header does not match
 `PRISM_BOT_TELEGRAM_WEBHOOK_SECRET`. A `last_error_message` of `403` in
 `webhook_status` therefore means the two have drifted apart.
+
+## Receiving Hub deliveries
+
+Prism Hub can schedule content — mail digests today — for a Telegram surface
+this deployment already exposes, without going through `/telegram/webhook` or
+any command: its delivery worker resolves a `TelegramSurfaceBinding`, renders
+the content through Porter, and pushes each rendered chunk straight to
+`POST /api/v1/delivery` on this deployment's public origin
+(`PrismHub::Adapters::HttpBotDeliveryGateway`, configured there as
+`PRISM_BOT_ORIGIN`).
+
+This client only relays what Hub already decided to send; it does not decide
+what gets sent, to whom, or on what schedule — that stays entirely Hub-owned,
+same as channels and identity. Setting `PRISM_BOT_DELIVERY_SECRET` in
+`shared/.env` is what opts this deployment into the integration:
+
+```text
+#PRISM_BOT_DELIVERY_SECRET=replace-with-at-least-16-random-characters
+#PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR=var/delivery-idempotency
+#PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS=86400
+#PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS=30
+#PRISM_HUBOT_DELIVERY_MAX_BODY_BYTES=65536
+```
+
+Leave it unset and nothing changes: `config.ru` mounts no `/api/v1/delivery`
+route at all, so there is nothing for an unconfigured Hub deployment to reach
+and nothing for an attacker to probe. Set it and it must equal, byte for byte,
+whatever Hub's own `PRISM_BOT_DELIVERY_SECRET` is configured with — that is the
+only credential authenticating this endpoint; there is no per-request Telegram
+or Hub identity check here, by design, because Hub already did that resolution
+before it ever calls in.
+
+Every request must carry the matching `x-prism-bot-delivery-secret` header and
+a `chat_id`/`text`/`idempotency_key` (and optional `message_thread_id`) JSON
+body; anything else is `401`/`415`/`400`.
+
+### Duplicate suppression is best-effort, not exactly-once
+
+Telegram's Bot API has no client-supplied idempotency key of its own: once a
+chunk is sent, there is no way to ask Telegram "did I already send this?",
+only this client's own record of having tried. Each `idempotency_key` moves
+through a small reservation under `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_DIR`:
+
+- a request atomically claims the key before calling Telegram, so a second
+  request for the same key arriving while the first is still in flight — a
+  real possibility, since Hub's own lease can expire and retry while this
+  client's call to Telegram is still outstanding — sees the reservation and
+  answers `409` instead of also calling Telegram; Hub's normal retry/backoff
+  handles the `409` like any other transient failure;
+- a completed delivery is remembered for `PRISM_HUBOT_DELIVERY_IDEMPOTENCY_TTL_SECONDS`
+  (default one day) and replayed on retry instead of calling Telegram again;
+- a delivery attempt that fails in a way this process observes (Telegram
+  rejects it, rate-limits it) releases its reservation immediately, so the
+  next retry is not made to wait.
+
+What this cannot close: if the process dies — a normal `Deploy` restart counts
+— between Telegram accepting a chunk and that fact being recorded, the
+reservation is orphaned. A retry for that key waits out
+`PRISM_HUBOT_DELIVERY_RESERVATION_TTL_SECONDS` (default 30s, sized to outlast
+one real attempt to Telegram, not to survive a crash) and then reclaims it,
+which can duplicate that one message. No file-based store on this side can
+close that window to zero; a lower TTL narrows it at the cost of occasionally
+reclaiming a reservation while it is still genuinely in flight.
+
+Like `var/interaction-state`, this directory is short-lived client
+bookkeeping, not business data: losing it entirely only risks a duplicate
+message on the next retry, never a wrong delivery.
+
+A `429` from Telegram is reported back as `429` with `retry_after_seconds`, so
+Hub's own backoff applies; anything else Telegram rejects is reported as `502`
+so Hub retries; a malformed request from Hub itself is `400` and is not
+retried, since Hub is expected to always send a well-formed request.
 
 ## Rollback
 

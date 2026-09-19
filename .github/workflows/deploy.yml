@@ -18,197 +18,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Release to VPS
+  dispatch:
+    name: Request infra deployment
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     environment: production
     env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_USER: ${{ secrets.SSH_USER }}
-      SSH_PORT: ${{ secrets.SSH_PORT }}
-      SSH_DEPLOYMENT_PATH: ${{ secrets.SSH_DEPLOYMENT_PATH }}
-      RESTART_COMMAND: ${{ vars.DEPLOY_RESTART_COMMAND }}
-      HEALTHCHECK_URL: ${{ vars.DEPLOY_HEALTHCHECK_URL }}
-      KEEP_RELEASES: 5
-
+      INFRA_REPOSITORY: aiaiaiai-org/infra
+      WORKLOAD: prism-hubot
+      RELEASE_REF: ${{ github.event.inputs.ref || 'master' }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Require deployment secrets
+      - name: Require infra dispatch credential
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          INFRA_DEPLOY_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
         run: |
-          set -euo pipefail
-          missing=()
-          for name in SSH_HOST SSH_USER SSH_DEPLOYMENT_PATH SSH_PRIVATE_KEY; do
-            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
-          done
-          if [ ${#missing[@]} -ne 0 ]; then
-            echo "Missing repository secrets: ${missing[*]}" >&2
-            echo "SSH_PORT is optional and defaults to 22." >&2
+          set -Eeuo pipefail
+          test -n "$INFRA_DEPLOY_TOKEN" || {
+            echo "::error::Missing production secret INFRA_DEPLOY_TOKEN."
+            echo "::error::It must be able to create repository_dispatch events in aiaiaiai-org/infra."
             exit 1
-          fi
-          case "$SSH_DEPLOYMENT_PATH" in
-            /*) ;;
-            *) echo "SSH_DEPLOYMENT_PATH must be an absolute path." >&2; exit 1 ;;
-          esac
+          }
 
-      - name: Configure SSH client
+      - name: Validate requested ref
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          RELEASE_REF: ${{ env.RELEASE_REF }}
         run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          port="${SSH_PORT:-22}"
-          if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
-            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            ssh-keyscan -p "$port" -H "$SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null
-          fi
-          chmod 600 ~/.ssh/known_hosts
-          test -s ~/.ssh/known_hosts
-          {
-            echo "Host deploy-target"
-            echo "  HostName $SSH_HOST"
-            echo "  User $SSH_USER"
-            echo "  Port $port"
-            echo "  IdentityFile ~/.ssh/deploy_key"
-            echo "  IdentitiesOnly yes"
-            echo "  StrictHostKeyChecking yes"
-            echo "  BatchMode yes"
-          } > ~/.ssh/config
-          chmod 600 ~/.ssh/config
-
-      - name: Resolve release commit
-        run: |
-          set -euo pipefail
-          release_sha="$(git rev-parse HEAD)"
-          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
-          echo "Deploying $release_sha"
-
-      - name: Build release archive
-        run: |
-          set -euo pipefail
-          git archive --format=tar --prefix=release/ "$RELEASE_SHA" | gzip -9 > /tmp/release.tar.gz
-          ls -l /tmp/release.tar.gz
-
-      - name: Prepare remote layout
-        run: |
-          set -euo pipefail
-          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
-          set -euo pipefail
-          mkdir -p "$DEPLOY_PATH/releases" "$DEPLOY_PATH/shared/var/interaction-state" "$DEPLOY_PATH/shared/bundle"
-          chmod 700 "$DEPLOY_PATH/shared/var/interaction-state"
-          if [ ! -f "$DEPLOY_PATH/shared/.env" ]; then
-            echo "Missing $DEPLOY_PATH/shared/.env on the VPS." >&2
-            echo "Create it from .env.example with real runtime values, then re-run this workflow." >&2
+          set -Eeuo pipefail
+          [[ "$RELEASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+            echo "::error::Invalid release ref."
             exit 1
-          fi
-          command -v ruby >/dev/null || { echo "ruby is not installed on the VPS." >&2; exit 1; }
-          command -v bundle >/dev/null || { echo "bundler is not installed on the VPS." >&2; exit 1; }
-          command -v git >/dev/null || { echo "git is required to resolve the pinned prism-bot dependency." >&2; exit 1; }
-          REMOTE
+          }
 
-      - name: Verify restart target
+      - name: Verify requested ref exists
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
+          RELEASE_REF: ${{ env.RELEASE_REF }}
         run: |
-          set -euo pipefail
-          if [ -n "${RESTART_COMMAND:-}" ]; then
-            echo "Using DEPLOY_RESTART_COMMAND; skipping the systemd unit check."
-            exit 0
-          fi
-          if ssh deploy-target "systemctl cat prism-hubot.service >/dev/null 2>&1"; then
-            echo "prism-hubot.service is installed on the VPS."
-            exit 0
-          fi
-          echo "prism-hubot.service is not installed on the VPS." >&2
-          echo "Install it once on the host, as root, from a checkout of this repository:" >&2
-          echo "  sudo DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' DEPLOY_USER='$SSH_USER' ./deploy/install-service.sh" >&2
-          echo "Or set the DEPLOY_RESTART_COMMAND repository variable to the command that" >&2
-          echo "restarts this service (see docs/deploy.md)." >&2
-          exit 1
+          set -Eeuo pipefail
+          gh api --fail "/repos/aiaiaiai-org/prism-hubot/commits/$RELEASE_REF" --jq '.sha' >/dev/null
 
-      - name: Upload release archive
+      - name: Dispatch contracted workload
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
+          RELEASE_REF: ${{ env.RELEASE_REF }}
         run: |
-          set -euo pipefail
-          scp /tmp/release.tar.gz deploy-target:"$SSH_DEPLOYMENT_PATH/releases/${RELEASE_SHA}.tar.gz"
+          set -Eeuo pipefail
+          gh api             --method POST             "/repos/$INFRA_REPOSITORY/dispatches"             -f event_type=deploy-workload             -f 'client_payload[workload]=prism-hubot'             -f "client_payload[ref]=$RELEASE_REF"
 
-      - name: Install release
-        run: |
-          set -euo pipefail
-          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' RELEASE='$RELEASE_SHA' KEEP_RELEASES='$KEEP_RELEASES' bash -s" <<'REMOTE'
-          set -euo pipefail
-          release_dir="$DEPLOY_PATH/releases/$RELEASE"
-          rm -rf "$release_dir"
-          mkdir -p "$release_dir"
-          tar -xzf "$DEPLOY_PATH/releases/$RELEASE.tar.gz" -C "$release_dir" --strip-components=1
-          rm -f "$DEPLOY_PATH/releases/$RELEASE.tar.gz"
-
-          ln -sfn "$DEPLOY_PATH/shared/.env" "$release_dir/.env"
-          mkdir -p "$release_dir/var"
-          ln -sfn "$DEPLOY_PATH/shared/var/interaction-state" "$release_dir/var/interaction-state"
-
-          cd "$release_dir"
-          bundle config set --local deployment true
-          bundle config set --local path "$DEPLOY_PATH/shared/bundle"
-          bundle config set --local without development
-          bundle install --jobs 4 --retry 3
-
-          # Reads shared/.env exactly as systemd will, before anything is
-          # repointed or restarted: a line systemd would drop fails here
-          # while the previous release is still serving.
-          bundle exec rake env:check
-
-          ln -sfn "$release_dir" "$DEPLOY_PATH/current.tmp"
-          mv -T "$DEPLOY_PATH/current.tmp" "$DEPLOY_PATH/current"
-
-          cd "$DEPLOY_PATH/releases"
-          ls -1dt */ 2>/dev/null | tail -n "+$((KEEP_RELEASES + 1))" | xargs -r rm -rf
-          REMOTE
-
-      - name: Restart service
-        run: |
-          set -euo pipefail
-          command="${RESTART_COMMAND:-sudo -n systemctl restart prism-hubot.service}"
-          if ! ssh deploy-target "$command"; then
-            echo "Restart command failed: $command" >&2
-            echo "The release is installed and 'current' points at it, but the service was not" >&2
-            echo "restarted. Check that the deploy user may run the restart without a TTY" >&2
-            echo "(deploy/install-service.sh writes a passwordless sudoers drop-in for it)." >&2
-            exit 1
-          fi
-
-      - name: Health check
-        if: env.HEALTHCHECK_URL != ''
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if ssh deploy-target "curl -fsS --max-time 5 '$HEALTHCHECK_URL' >/dev/null"; then
-              echo "Healthy after attempt $attempt."
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "Health check did not pass: $HEALTHCHECK_URL" >&2
-          exit 1
-
-      - name: Sync Telegram command menu
-        run: |
-          set -euo pipefail
-          ssh deploy-target "DEPLOY_PATH='$SSH_DEPLOYMENT_PATH' bash -s" <<'REMOTE'
-          set -euo pipefail
-          cd "$DEPLOY_PATH/current"
-          bundle exec rake telegram:commands
-          REMOTE
-
-      - name: Remove SSH material
+      - name: Publish summary
         if: always()
-        run: rm -rf ~/.ssh
+        run: |
+          {
+            echo "### Infra deployment requested"
+            echo
+            echo "- workload: `$WORKLOAD`"
+            echo "- repository: `aiaiaiai-org/prism-hubot`"
+            echo "- ref: `$RELEASE_REF`"
+            echo "- target/runtime/path are resolved by `aiaiaiai-org/infra`"
+            echo "- result: `${{ job.status }}`"
+          } >> "$GITHUB_STEP_SUMMARY"
