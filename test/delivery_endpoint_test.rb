@@ -8,6 +8,36 @@ class DeliveryEndpointTest < Minitest::Test
 
   SECRET_VALUE = "s" * 32
 
+  class BlockingOutboundDelivery
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+      @started = Queue.new
+      @release = Queue.new
+    end
+
+    def wait_until_called
+      @started.pop
+    end
+
+    def release
+      @release << true
+    end
+
+    def deliver_message(chat_id:, text:, idempotency_key:, message_thread_id: nil)
+      @calls << {
+        chat_id: chat_id,
+        text: text,
+        idempotency_key: idempotency_key,
+        message_thread_id: message_thread_id
+      }
+      @started << true
+      @release.pop
+      PrismBot::Domain::DeliveryResult.new(provider_message_id: 42, idempotency_key: idempotency_key)
+    end
+  end
+
   def test_wrong_method_is_not_found
     status, = call_endpoint(method: "GET")
 
@@ -72,7 +102,7 @@ class DeliveryEndpointTest < Minitest::Test
       idempotency_store = build_idempotency_store(directory)
       endpoint = build_endpoint(outbound_delivery: PrismHubotTestSupport::FakeOutboundDelivery.new, idempotency_store: idempotency_store)
 
-      endpoint.call(rack_env(payload: {"chat_id" => 1, "text" => "hi"})) # missing idempotency_key
+      endpoint.call(rack_env(payload: {"chat_id" => 1, "text" => "hi"}))
 
       assert_empty Dir.children(directory)
     end
@@ -107,25 +137,29 @@ class DeliveryEndpointTest < Minitest::Test
     end
   end
 
-  # The race the review flagged: a second request for the same key arriving
-  # while the first is still in flight must not also call Telegram.
-  def test_concurrent_duplicate_is_reported_as_conflict_without_a_second_telegram_call
-    outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new
+  def test_concurrent_duplicate_is_serialized_without_a_second_telegram_call
+    outbound_delivery = BlockingOutboundDelivery.new
     Dir.mktmpdir do |directory|
-      idempotency_store = build_idempotency_store(directory)
-      idempotency_store.reserve(idempotency_key: "digest-chunk-1") # simulates the first request already in flight
-      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: idempotency_store)
+      endpoint = build_endpoint(outbound_delivery: outbound_delivery, idempotency_store: build_idempotency_store(directory))
+      first = Thread.new { endpoint.call(rack_env(payload: default_payload)) }
+      outbound_delivery.wait_until_called
 
-      status, _headers, body = endpoint.call(rack_env(payload: default_payload))
+      second = Thread.new { endpoint.call(rack_env(payload: default_payload)) }
+      sleep 0.01
 
-      assert_equal 409, status
-      assert_equal "prism_hubot.delivery.in_progress", parse(body).dig("error", "code")
-      assert_empty outbound_delivery.calls
+      assert_equal 1, outbound_delivery.calls.length
+
+      outbound_delivery.release
+      first_status, _headers, first_body = first.value
+      second_status, _headers, second_body = second.value
+
+      assert_equal 200, first_status
+      assert_equal 200, second_status
+      assert_equal parse(first_body), parse(second_body)
+      assert_equal 1, outbound_delivery.calls.length
     end
   end
 
-  # A reservation left behind by a request that failed in a way this process
-  # actually observed (as opposed to a crash) must not block a prompt retry.
   def test_a_released_reservation_lets_the_next_attempt_call_telegram
     outbound_delivery = PrismHubotTestSupport::FakeOutboundDelivery.new(
       error: PrismBot::MessageDeliveryError.new("bot.telegram.unavailable", "Telegram is unavailable")
