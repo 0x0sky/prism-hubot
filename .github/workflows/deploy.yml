@@ -39,6 +39,16 @@ jobs:
             exit 1
           }
 
+      - name: Validate requested ref
+        env:
+          RELEASE_REF: ${{ env.RELEASE_REF }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+            echo "::error::Invalid release ref."
+            exit 1
+          }
+
       - name: Verify requested ref exists
         env:
           GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
