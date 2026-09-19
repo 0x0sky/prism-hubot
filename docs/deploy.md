@@ -21,9 +21,9 @@ and selects the ref to release.
 
 The workflow dispatches `deploy-workload` to `aiaiaiai-org/infra`. Infra then
 selects the target GitHub Environment from the workload contract and reuses that
-environment's machine credentials. GitHub's repository-dispatch API requires a
-credential with Contents write access to the target repository; that credential
-is the only deployment secret kept here and it grants no SSH access. citeturn4search2
+environment's machine credentials. GitHub's repository-dispatch API requires a credential with Contents write access
+to the target repository; that credential is the only deployment secret kept
+here and it grants no SSH access.
 
 Deployments are serialised through the `deploy-vps` concurrency group and run
 in the `production` environment, so approval or branch restrictions can be
