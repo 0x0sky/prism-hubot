@@ -54,47 +54,44 @@ module PrismHubot
     rescue JSON::ParserError
       response(400, "status" => "error", "error" => {"code" => "prism_hubot.delivery.json.invalid"})
     rescue PrismBot::InputError => error
-      # From this endpoint's own `validate!`, before any reservation exists —
-      # the deeper InputError that `deliver_message` itself can raise is
-      # handled inside `deliver`, where releasing the reservation applies.
       response(400, "status" => "error", "error" => {"code" => error.code})
     end
 
     private
 
-    # idempotency_key is already known here, so every rescue clause releases
-    # whatever reservation `reserve` made before re-raising as a response:
-    # a failure this process actually observed must not block a prompt retry
-    # for the full reservation_ttl_seconds the way an unobserved crash would.
     def deliver(chat_id:, message_thread_id:, text:, idempotency_key:)
-      reservation = @idempotency_store.reserve(idempotency_key: idempotency_key)
-      if reservation.completed?
-        return success(idempotency_key, reservation.provider_message_id)
-      elsif reservation.in_progress?
-        return response(409, "status" => "error", "error" => {"code" => "prism_hubot.delivery.in_progress"})
-      end
+      @idempotency_store.with_key_lock(idempotency_key) do
+        reservation = @idempotency_store.reserve(idempotency_key: idempotency_key)
+        if reservation.completed?
+          next success(idempotency_key, reservation.provider_message_id)
+        elsif reservation.in_progress?
+          next response(409, "status" => "error", "error" => {"code" => "prism_hubot.delivery.in_progress"})
+        end
 
-      result = @outbound_delivery.deliver_message(
-        chat_id: chat_id,
-        text: text,
-        message_thread_id: message_thread_id,
-        idempotency_key: idempotency_key
-      )
-      @idempotency_store.complete!(idempotency_key: idempotency_key, provider_message_id: result.provider_message_id)
-      success(idempotency_key, result.provider_message_id)
-    rescue PrismBot::InputError => error
-      @idempotency_store.release(idempotency_key: idempotency_key)
-      response(400, "status" => "error", "error" => {"code" => error.code})
-    rescue PrismBot::DeliveryRateLimited => error
-      @idempotency_store.release(idempotency_key: idempotency_key)
-      response(429, "status" => "error", "error" => {
-        "code" => error.code,
-        "retry_after_seconds" => error.retry_after_seconds
-      })
-    rescue PrismBot::Error => error
-      @idempotency_store.release(idempotency_key: idempotency_key)
-      @logger.warn("prism_hubot_delivery upstream_error code=#{error.code}")
-      response(502, "status" => "error", "error" => {"code" => error.code})
+        begin
+          result = @outbound_delivery.deliver_message(
+            chat_id: chat_id,
+            text: text,
+            message_thread_id: message_thread_id,
+            idempotency_key: idempotency_key
+          )
+          @idempotency_store.complete!(idempotency_key: idempotency_key, provider_message_id: result.provider_message_id)
+          success(idempotency_key, result.provider_message_id)
+        rescue PrismBot::InputError => error
+          @idempotency_store.release(idempotency_key: idempotency_key)
+          response(400, "status" => "error", "error" => {"code" => error.code})
+        rescue PrismBot::DeliveryRateLimited => error
+          @idempotency_store.release(idempotency_key: idempotency_key)
+          response(429, "status" => "error", "error" => {
+            "code" => error.code,
+            "retry_after_seconds" => error.retry_after_seconds
+          })
+        rescue PrismBot::Error => error
+          @idempotency_store.release(idempotency_key: idempotency_key)
+          @logger.warn("prism_hubot_delivery upstream_error code=#{error.code}")
+          response(502, "status" => "error", "error" => {"code" => error.code})
+        end
+      end
     end
 
     def success(idempotency_key, provider_message_id)
