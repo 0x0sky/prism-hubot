@@ -67,7 +67,15 @@ module PrismHubot
     def reserve(idempotency_key:)
       path = path_for(idempotency_key)
       record = read(path)
-      return Reservation.new(status: :reserved, provider_message_id: nil) if record.nil?
+      if record.nil?
+        # Persist the reservation even for a key seen for the first time:
+        # without this, a crash between this call and complete!/release
+        # leaves nothing on disk to recognize on retry, so that one retry
+        # would skip the same grace period every other reclaimed
+        # reservation gets and go straight back to Telegram.
+        write_pending(path)
+        return Reservation.new(status: :reserved, provider_message_id: nil)
+      end
 
       case record["status"]
       when STATUS_COMPLETED
@@ -138,7 +146,12 @@ module PrismHubot
 
     def read(path)
       source = File.binread(path, MAX_RECORD_BYTES + 1)
-      return nil if source.bytesize > MAX_RECORD_BYTES
+      # with_key_lock creates the lock file with File::CREAT before any
+      # content exists, so the very first reserve for a key reads it while
+      # still empty. File#binread(path, length) returns nil at immediate EOF
+      # (not ""), which is exactly that case, not a corrupt or oversized
+      # record — treat it the same as "no record yet".
+      return nil if source.nil? || source.bytesize > MAX_RECORD_BYTES
 
       payload = JSON.parse(source)
       payload.is_a?(Hash) && payload["version"] == FORMAT_VERSION ? payload : nil
